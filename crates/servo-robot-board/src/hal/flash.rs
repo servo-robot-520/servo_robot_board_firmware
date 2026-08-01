@@ -268,11 +268,9 @@ pub fn erase_sector(flash: &FLASH, sector: u8) -> Result<(), FlashError> {
     result
 }
 
-/// 擦除 OTA Temp 区域 (Sector 4-6)
+/// 擦除 OTA Temp 区域 (Sector 6)
 pub fn erase_ota_temp(flash: &FLASH) -> Result<(), FlashError> {
-    erase_sector(flash, SECTOR_OTA_START)?;
-    erase_sector(flash, 5)?;
-    erase_sector(flash, SECTOR_OTA_END)
+    erase_sector(flash, SECTOR_OTA_START)
 }
 
 /// 擦除 User Data 扇区

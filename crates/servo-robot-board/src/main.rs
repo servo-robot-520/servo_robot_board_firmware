@@ -129,7 +129,16 @@ mod app {
                             self.bus.transfer_in_place(words)?
                         }
                         embedded_hal::spi::Operation::DelayNs(ns) => {
-                            cortex_m::asm::delay(ns.saturating_mul(96) / 1_000)
+                            // 先转为微秒避免 ns*96 溢出 u32 (96MHz)
+                            let ns_val = *ns;
+                            let us = ns_val / 1000;
+                            let rem = ns_val % 1000;
+                            if us > 0 {
+                                cortex_m::asm::delay(us.saturating_mul(96));
+                            }
+                            if rem > 0 {
+                                cortex_m::asm::delay(rem.saturating_mul(96) / 1000);
+                            }
                         }
                     }
                 }
@@ -146,7 +155,15 @@ mod app {
 
     impl embedded_hal::delay::DelayNs for BusyDelay {
         fn delay_ns(&mut self, ns: u32) {
-            cortex_m::asm::delay(ns.saturating_mul(96) / 1_000);
+            // 先转为微秒避免 ns*96 溢出 u32 (96MHz)
+            let us = ns / 1000;
+            let rem = ns % 1000;
+            if us > 0 {
+                cortex_m::asm::delay(us.saturating_mul(96));
+            }
+            if rem > 0 {
+                cortex_m::asm::delay(rem.saturating_mul(96) / 1000);
+            }
         }
     }
 
@@ -180,8 +197,9 @@ mod app {
         pd_request_current: u16,
         // 电池温度 (from BQ40Z50, 实际值 = 原始值 / 10)
         temp_battery: i16,
-        // IMU ID
+        // IMU 状态
         imu_id: u8,
+        imu_ok: bool,
         usb_dev: hal::usb::UsbCompositeDevice<'static, stm32f4xx_hal::otg_fs::UsbBusType>,
         // UART2 外设 (用于与 Linux 上位机通讯)
         usart2: pac::USART2,
@@ -393,9 +411,17 @@ mod app {
         };
         let mut mpu6500 = embedded_mpu6500::Mpu6500::new(mpu_spi);
         let mut mpu_delay = BusyDelay;
-        mpu6500.init(&mut mpu_delay).ok();
-        let who = mpu6500.who_am_i().unwrap_or(0);
-        defmt::info!("MPU6500 WHO_AM_I: 0x{:02X}", who);
+        let (who, imu_ok) = match mpu6500.init(&mut mpu_delay) {
+            Ok(()) => {
+                let who = mpu6500.who_am_i().unwrap_or(0);
+                defmt::info!("MPU6500 WHO_AM_I: 0x{:02X}", who);
+                (who, true)
+            }
+            Err(_e) => {
+                defmt::error!("MPU6500 init failed");
+                (0, false)
+            }
+        };
 
         // USB OTG FS
         let usb_dm = gpioa.pa11.into_alternate();
@@ -477,6 +503,7 @@ mod app {
                 pd_request_current: 0,
                 temp_battery: 0,
                 imu_id: who,
+                imu_ok,
                 usb_dev,
                 usart2: dp.USART2,
                 usart1: dp.USART1,

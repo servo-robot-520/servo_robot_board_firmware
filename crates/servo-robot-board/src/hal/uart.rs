@@ -196,8 +196,12 @@ pub fn uart2_try_decode_frame() -> Option<servo_robot_protocol::frame::RawFrame>
                         }
                         return Some(frame);
                     }
+                    Err(servo_robot_protocol::error::FrameError::Incomplete { .. }) => {
+                        // 数据不足，保留缓冲区等待更多数据
+                        return None;
+                    }
                     Err(_) => {
-                        // 解码失败，丢弃帧头字节，继续搜索
+                        // 真正的解码错误（CRC 错误等），丢弃帧头字节，继续搜索
                         UART2_RX_BUF.read_byte();
                         continue;
                     }
