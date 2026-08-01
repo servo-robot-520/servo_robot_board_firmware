@@ -12,7 +12,8 @@ pub const LED_COUNT: usize = 3;
 
 /// PWM 频率: 800kHz → 周期 1.25μs
 /// 在 96MHz APB2 时钟下, 预分频 0, 周期 = 120 个计数
-const PWM_PERIOD: u16 = 120;
+/// (常量保留供文档参考，实际配置在 hal/ws2812.rs)
+// const PWM_PERIOD: u16 = 120;
 /// 0 bit: 高电平 ~350ns → 42 计数 (0.35µs * 96 + 10 余量)
 const PWM_ZERO: u16 = 42;
 /// 1 bit: 高电平 ~700ns → 78 计数 (0.7µs * 96 + 10 余量)

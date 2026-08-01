@@ -31,8 +31,14 @@ static mut WS2812_DMA_BUF: [u16; DMA_BUF_SIZE] = [0; DMA_BUF_SIZE];
 /// - GPIOA clock must be enabled
 /// - TIM1 clock must be enabled (RCC APB2ENR.TIM1EN)
 /// - DMA2 clock must be enabled (RCC AHB1ENR.DMA2EN)
+///
+/// # Safety Note
+/// 此函数直接操作 GPIOA 寄存器配置 PA9 为 AF1，绕过 HAL 的所有权模型。
+/// 调用后 PA9 不应再通过 HAL 使用（如 `gpioa.pa9.into_alternate()`），
+/// 否则 HAL 可能 panic 或行为异常。
 pub fn init_tim1_dma(tim1: &TIM1) {
     // --- Configure PA9 as AF1 (TIM1 CH2) ---
+    // 注意: 直接操作寄存器，绕过 HAL，PA9 后续不可再通过 HAL 使用
     {
         let gpioa = unsafe { &*stm32f4xx_hal::pac::GPIOA::ptr() };
         // AFRH[11:8] = AF1 for PA9

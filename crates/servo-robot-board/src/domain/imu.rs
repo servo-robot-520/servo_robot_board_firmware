@@ -73,7 +73,7 @@ impl MahonyFilter {
         let accel_norm_sq = ax * ax + ay * ay + az * az;
         if accel_norm_sq > 0.0 {
             // Normalize accelerometer measurement
-            let recip_norm = inv_sqrt(accel_norm_sq);
+            let recip_norm = recip_sqrt(accel_norm_sq);
             let ax = ax * recip_norm;
             let ay = ay * recip_norm;
             let az = az * recip_norm;
@@ -123,7 +123,7 @@ impl MahonyFilter {
         self.q3 += qa * gz + qb * gy - qc * gx;
 
         // Normalize quaternion
-        let recip_norm = inv_sqrt(
+        let recip_norm = recip_sqrt(
             self.q0 * self.q0 + self.q1 * self.q1 + self.q2 * self.q2 + self.q3 * self.q3,
         );
         self.q0 *= recip_norm;
@@ -165,9 +165,10 @@ impl MahonyFilter {
     }
 }
 
-/// Fast inverse square root (1/sqrt(x)).
+/// Reciprocal square root (1/sqrt(x)).
+/// 编译为 VSQRT.F32 + VDIV.F32 两条指令。
 #[inline(always)]
-fn inv_sqrt(x: f32) -> f32 {
+fn recip_sqrt(x: f32) -> f32 {
     1.0 / libm::sqrtf(x)
 }
 

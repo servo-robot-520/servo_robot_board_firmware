@@ -888,31 +888,33 @@ mod app {
     // 当 board_event 状态变化时由各任务 spawn，仅在有差异时发送事件帧
     #[task(priority = 2, shared = [board_event, prev_board_event])]
     async fn event_task(mut ctx: event_task::Context) {
-        let changed = ctx.shared.board_event.lock(|cur| {
-            ctx.shared.prev_board_event.lock(|prev| {
+        // 在同一把锁内完成 diff 检查和快照克隆，避免两次读取之间被高优先级任务修改
+        let snapshot = ctx.shared.board_event.lock(|cur| {
+            let changed = ctx.shared.prev_board_event.lock(|prev| {
                 domain::event::diff_and_update(prev, cur)
-            })
+            });
+            if changed { Some(cur.clone()) } else { None }
         });
-        if changed {
-            let e = ctx.shared.board_event.lock(|e| e.clone());
+        if let Some(e) = snapshot {
             comm_tx_task::spawn(TypedFrame::Event(e)).ok();
         }
     }
 
     // ===== EXTI9_5 中断 (PB5 = BC_ACOK) =====
-    #[task(priority = 3, binds = EXTI9_5, shared = [board_event])]
-    fn exti9_5_task(ctx: exti9_5_task::Context) {
+    #[task(priority = 3, binds = EXTI9_5)]
+    fn exti9_5_task(_ctx: exti9_5_task::Context) {
         // 清除 EXTI5 pending bit (写 1 清除)
         let exti = unsafe { &*stm32f4xx_hal::pac::EXTI::ptr() };
         exti.pr().write(|w| w.pr5().clear_bit_by_one());
 
+        // BC_ACOK 引脚状态由 sys_info_task 轮询更新，这里只触发事件
         defmt::info!("EXTI9_5: BC_ACOK changed");
         event_task::spawn().ok();
     }
 
     // ===== EXTI15_10 中断 (PB14 = HUSB238A INT) =====
-    #[task(priority = 3, binds = EXTI15_10, shared = [board_event])]
-    fn exti15_10_task(ctx: exti15_10_task::Context) {
+    #[task(priority = 3, binds = EXTI15_10)]
+    fn exti15_10_task(_ctx: exti15_10_task::Context) {
         // 清除 EXTI14 pending bit (写 1 清除)
         let exti = unsafe { &*stm32f4xx_hal::pac::EXTI::ptr() };
         exti.pr().write(|w| w.pr14().clear_bit_by_one());
