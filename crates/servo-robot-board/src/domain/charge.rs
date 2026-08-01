@@ -19,12 +19,29 @@ const BAT_TEMP_HOT_LIMIT: i16 = 500;
 // Charging current limit (mA)
 // ============================================================================
 
-/// Minimum charging current => 0.5A
-const CHARGE_CURRENT_MIN_MA: u16 = 500;
-/// Default maximum charging current => 9A
-const CHARGE_CURRENT_MAX_DEFAULT_MA: u16 = 9000;
+/// Minimum charging current => 448mA (BQ24725 步进 64mA)
+const CHARGE_CURRENT_MIN_MA: u16 = 448;
+/// Default maximum charging current => 8.0A (BQ24725 上限 8128mA, 步进 64mA)
+const CHARGE_CURRENT_MAX_DEFAULT_MA: u16 = 8000;
+/// BQ24725 驱动允许的充电电流上限
+const BQ24725_CHARGE_CURRENT_MAX_MA: u16 = 8128;
 /// Default charging voltage => (4S: 16.8V)
 const CHARGE_VOLTAGE_DEFAULT_MV: u16 = 16800;
+
+/// BQ24725 充电电流量化到 64mA 步进（向下取整）
+fn quantize_charge_current(ma: u16) -> u16 {
+    (ma / 64) * 64
+}
+
+/// BQ24725 输入电流量化到 128mA 步进（向下取整）
+fn quantize_input_current(ma: u16) -> u16 {
+    (ma / 128) * 128
+}
+
+/// BQ24725 充电电压量化到 16mV 步进（向下取整）
+fn quantize_charge_voltage(mv: u16) -> u16 {
+    (mv / 16) * 16
+}
 
 // ============================================================================
 // Charging phase
@@ -370,55 +387,89 @@ where
     }
 }
 
+/// BQ24725 充电设置错误
+#[derive(Debug, defmt::Format)]
+pub enum ChargeSetError {
+    /// I2C 通信错误
+    I2c,
+    /// 参数超出驱动有效范围
+    OutOfRange,
+}
+
 /// 设置 BQ24725 充电参数
+///
+/// 返回 Ok(true) 表示成功设置，Ok(false) 表示参数超出范围（安全停止），
+/// Err 表示 I2C 通信失败。
+///
+/// 当 target_current_ma 为 0 时，禁用充电。
 pub fn set_bq24725_charge<I2C, E>(
     i2c: &mut I2C,
     target_current_ma: u16,
     voltage_mv: u16,
     input_current_ma: u16,
-) -> Result<(), E>
+) -> Result<bool, E>
 where
     I2C: embedded_hal::i2c::I2c<Error = E>,
 {
     use embedded_bq24725::Bq24725;
 
-    // 预验证输入范围，避免驱动返回范围错误导致 panic
-    if target_current_ma < 128 || target_current_ma > 8128 {
-        defmt::error!("BQ24725: charge current {} out of range (128-8128)", target_current_ma);
-        return Ok(());
-    }
-    if voltage_mv < 1024 || voltage_mv > 19200 {
-        defmt::error!("BQ24725: charge voltage {} out of range (1024-19200)", voltage_mv);
-        return Ok(());
-    }
-    if input_current_ma > 0 && (input_current_ma < 128 || input_current_ma > 8064) {
-        defmt::error!("BQ24725: input current {} out of range (128-8064)", input_current_ma);
-        return Ok(());
+    let mut charger = Bq24725::new(i2c);
+
+    // 目标电流为 0 时，禁用充电
+    if target_current_ma == 0 {
+        charger.set_charging_enabled(false).map_err(|e| match e {
+            embedded_bq24725::Error::I2c(e) => e,
+            _ => unreachable!(),
+        })?;
+        return Ok(true);
     }
 
-    let mut charger = Bq24725::new(i2c);
-    // 范围错误不应发生（输入已预验证），但安全处理而非 panic
+    // 量化到 BQ24725 要求的步进，确保驱动不会返回范围错误
+    // 充电电流: 64mA 步进, 输入电流: 128mA 步进
+    let target_current = quantize_charge_current(target_current_ma);
+    let input_current = quantize_input_current(input_current_ma);
+    let charge_voltage = quantize_charge_voltage(voltage_mv);
+
+    // 量化后验证范围，超出范围返回 Ok(false) 表示安全停止
+    if target_current < 128 || target_current > BQ24725_CHARGE_CURRENT_MAX_MA {
+        defmt::error!("BQ24725: charge current {} (quantized {}) out of range", target_current_ma, target_current);
+        // 安全禁用充电
+        let _ = charger.set_charging_enabled(false);
+        return Ok(false);
+    }
+    if charge_voltage < 1024 || charge_voltage > 19200 {
+        defmt::error!("BQ24725: charge voltage {} (quantized {}) out of range", voltage_mv, charge_voltage);
+        let _ = charger.set_charging_enabled(false);
+        return Ok(false);
+    }
+
+    // 量化后的值在有效范围内且步进正确，驱动不应返回范围错误
     charger
-        .set_charge_current_ma(target_current_ma)
+        .set_charge_current_ma(target_current)
         .map_err(|e| match e {
             embedded_bq24725::Error::I2c(e) => e,
-            _ => unreachable!("BQ24725 range error with validated inputs"),
+            _ => unreachable!("BQ24725 range error after quantization"),
         })?;
     charger
-        .set_charge_voltage_mv(voltage_mv)
+        .set_charge_voltage_mv(charge_voltage)
         .map_err(|e| match e {
             embedded_bq24725::Error::I2c(e) => e,
-            _ => unreachable!("BQ24725 range error with validated inputs"),
+            _ => unreachable!("BQ24725 range error after quantization"),
         })?;
-    if input_current_ma > 0 {
+    if input_current >= 128 {
         charger
-            .set_input_current_ma(input_current_ma)
+            .set_input_current_ma(input_current)
             .map_err(|e| match e {
                 embedded_bq24725::Error::I2c(e) => e,
-                _ => unreachable!("BQ24725 range error with validated inputs"),
+                _ => unreachable!("BQ24725 range error after quantization"),
             })?;
     }
-    Ok(())
+    // 确保充电使能
+    charger.set_charging_enabled(true).map_err(|e| match e {
+        embedded_bq24725::Error::I2c(e) => e,
+        _ => unreachable!(),
+    })?;
+    Ok(true)
 }
 
 /// 完整的充电状态更新
@@ -466,15 +517,22 @@ where
     );
 
     // 设置 BQ24725 充电参数
-    if target_current > 0 {
-        let charge_voltage = charge_voltage_mv;
-        let input_current = if husb.current_ma > 0.0 {
-            husb.current_ma as u16
-        } else {
-            0
-        };
-        if let Err(_e) = set_bq24725_charge(i2c, target_current, charge_voltage, input_current) {
-            defmt::warn!("BQ24725 charge set failed");
+    // 无论目标电流是否为零，都下发硬件命令，确保 BQ24725 状态与软件一致
+    let charge_voltage = charge_voltage_mv;
+    let input_current = if husb.current_ma > 0.0 {
+        husb.current_ma as u16
+    } else {
+        0
+    };
+    match set_bq24725_charge(i2c, target_current, charge_voltage, input_current) {
+        Ok(true) => {} // 成功设置
+        Ok(false) => {
+            // 参数超出范围，安全停止充电
+            defmt::warn!("BQ24725: params out of range, charge stopped");
+            super::error_stats::ERROR_STATS.inc_charge();
+        }
+        Err(_e) => {
+            defmt::warn!("BQ24725 charge set I2C error");
             super::error_stats::ERROR_STATS.inc_charge();
         }
     }
