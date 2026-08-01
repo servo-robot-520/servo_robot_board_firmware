@@ -54,16 +54,7 @@ impl MahonyFilter {
     /// Update filter with accelerometer (g) and gyroscope (deg/s) readings.
     ///
     /// `dt` is the sample period in seconds (e.g. 0.01 for 100 Hz).
-    pub fn update(
-        &mut self,
-        ax: f32,
-        ay: f32,
-        az: f32,
-        gx: f32,
-        gy: f32,
-        gz: f32,
-        dt: f32,
-    ) {
+    pub fn update(&mut self, ax: f32, ay: f32, az: f32, gx: f32, gy: f32, gz: f32, dt: f32) {
         // Convert gyro from deg/s to rad/s
         let mut gx = gx * DEG_TO_RAD;
         let mut gy = gy * DEG_TO_RAD;

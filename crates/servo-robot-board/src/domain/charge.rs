@@ -112,7 +112,7 @@ pub fn calc_charge_current_ma(
     } else {
         // 高温降流: 45~50°C 线性降至 CHARGE_CURRENT_MIN_MA
         let range = BAT_TEMP_HOT_LIMIT - BAT_TEMP_WARM_LIMIT; // 50 (i16)
-        let delta = BAT_TEMP_HOT_LIMIT - batt_temp;            // 0~50 (i16)
+        let delta = BAT_TEMP_HOT_LIMIT - batt_temp; // 0~50 (i16)
         // ratio_10000: 0 = 最热(50°C), 10000 = 最冷(45°C)
         let ratio_10000 = ((delta as i32 * 10000) / range as i32).clamp(0, 10000) as u16;
         let span = max_current_ma.saturating_sub(CHARGE_CURRENT_MIN_MA);
@@ -432,13 +432,21 @@ where
 
     // 量化后验证范围，超出范围返回 Ok(false) 表示安全停止
     if target_current < 128 || target_current > BQ24725_CHARGE_CURRENT_MAX_MA {
-        defmt::error!("BQ24725: charge current {} (quantized {}) out of range", target_current_ma, target_current);
+        defmt::error!(
+            "BQ24725: charge current {} (quantized {}) out of range",
+            target_current_ma,
+            target_current
+        );
         // 安全禁用充电
         let _ = charger.set_charging_enabled(false);
         return Ok(false);
     }
     if charge_voltage < 1024 || charge_voltage > 19200 {
-        defmt::error!("BQ24725: charge voltage {} (quantized {}) out of range", voltage_mv, charge_voltage);
+        defmt::error!(
+            "BQ24725: charge voltage {} (quantized {}) out of range",
+            voltage_mv,
+            charge_voltage
+        );
         let _ = charger.set_charging_enabled(false);
         return Ok(false);
     }

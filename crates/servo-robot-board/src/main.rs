@@ -326,22 +326,23 @@ mod app {
         let pwr_key = gpiob.pb13.into_push_pull_output();
         let servo_tx_en = gpiob.pb12.into_push_pull_output();
         let bc_acok = gpiob.pb5.into_pull_down_input();
-        let _husb_int = gpiob.pb14.into_pull_down_input();
+        // HUSB238A INT_N: 低有效，配置为上拉输入
+        let _husb_int = gpiob.pb14.into_pull_up_input();
 
-        // EXTI 外部中断配置: PB5 (BC_ACOK) 和 PB14 (HUSB238A INT)
-        // 上升沿触发，用于检测充电器连接和 USB PD 事件
+        // EXTI 外部中断配置: PB5 (BC_ACOK) 和 PB14 (HUSB238A INT_N)
+        // PB5 (BC_ACOK): 上升沿触发（充电器连接）
+        // PB14 (HUSB238A INT_N): 下降沿触发（低有效中断）
         {
             let syscfg = unsafe { &*stm32f4xx_hal::pac::SYSCFG::ptr() };
             // EXTICR2: EXTI5 = PB (1) — PB5 = BC_ACOK
             syscfg.exticr2().modify(|_, w| w.exti5().pb());
-            // EXTICR4: EXTI14 = PB (1) — PB14 = HUSB238A INT
+            // EXTICR4: EXTI14 = PB (1) — PB14 = HUSB238A INT_N
             syscfg.exticr4().modify(|_, w| w.exti14().pb());
 
             let exti = unsafe { &*stm32f4xx_hal::pac::EXTI::ptr() };
-            // 上升沿触发
-            exti.rtsr().modify(|_, w| w.tr5().set_bit().tr14().set_bit());
-            // 不触发下降沿
-            exti.ftsr().modify(|_, w| w.tr5().clear_bit().tr14().clear_bit());
+            // PB5 上升沿, PB14 下降沿
+            exti.rtsr().modify(|_, w| w.tr5().set_bit());
+            exti.ftsr().modify(|_, w| w.tr14().set_bit());
             // 使能中断
             exti.imr().modify(|_, w| w.mr5().set_bit().mr14().set_bit());
 
@@ -351,7 +352,7 @@ mod app {
                 cortex_m::peripheral::NVIC::unmask(stm32f4xx_hal::pac::Interrupt::EXTI15_10);
             }
         }
-        defmt::info!("EXTI configured: PB5 (BC_ACOK), PB14 (HUSB238A INT)");
+        defmt::info!("EXTI configured: PB5 (BC_ACOK rising), PB14 (HUSB238A INT_N falling)");
 
         // ADC GPIO: PA0, PA1, PA4 = 模拟输入; PB0, PB1 = 模拟输入
         {
@@ -656,7 +657,8 @@ mod app {
         // 从 ADC 读取充电电路 NTC 温度
         let adc_buf = hal::adc::adc_buf();
         // 转换为 0.1°C 单位，与 charge_temp_limit/derating 一致
-        let charger_temp = (domain::thermal::ntc_temp_c(adc_buf[hal::adc::CH_TEMP_CHARGE]) * 10.0) as i16;
+        let charger_temp =
+            (domain::thermal::ntc_temp_c(adc_buf[hal::adc::CH_TEMP_CHARGE]) * 10.0) as i16;
 
         let phase_enum = ctx.shared.i2c1.lock(|i2c| {
             let cfg = ctx.shared.config.lock(|c| c.clone());
@@ -890,9 +892,10 @@ mod app {
     async fn event_task(mut ctx: event_task::Context) {
         // 在同一把锁内完成 diff 检查和快照克隆，避免两次读取之间被高优先级任务修改
         let snapshot = ctx.shared.board_event.lock(|cur| {
-            let changed = ctx.shared.prev_board_event.lock(|prev| {
-                domain::event::diff_and_update(prev, cur)
-            });
+            let changed = ctx
+                .shared
+                .prev_board_event
+                .lock(|prev| domain::event::diff_and_update(prev, cur));
             if changed { Some(cur.clone()) } else { None }
         });
         if let Some(e) = snapshot {
@@ -901,26 +904,57 @@ mod app {
     }
 
     // ===== EXTI9_5 中断 (PB5 = BC_ACOK) =====
-    #[task(priority = 3, binds = EXTI9_5)]
-    fn exti9_5_task(_ctx: exti9_5_task::Context) {
+    // 上升沿触发，读取引脚状态并同步更新 board_event
+    #[task(priority = 3, binds = EXTI9_5, shared = [board_event, bc_acok])]
+    fn exti9_5_task(mut ctx: exti9_5_task::Context) {
         // 清除 EXTI5 pending bit (写 1 清除)
         let exti = unsafe { &*stm32f4xx_hal::pac::EXTI::ptr() };
         exti.pr().write(|w| w.pr5().clear_bit_by_one());
 
-        // BC_ACOK 引脚状态由 sys_info_task 轮询更新，这里只触发事件
-        defmt::info!("EXTI9_5: BC_ACOK changed");
+        // 读取 BC_ACOK 引脚状态并更新 board_event
+        let acok = ctx.shared.bc_acok.lock(|pin| pin.is_high());
+        ctx.shared.board_event.lock(|e| {
+            e.state_change_flags
+                .set(StateChangeFlags::CHARGER_CONNECTED, acok);
+        });
+        defmt::info!("EXTI9_5: BC_ACOK = {}", acok);
         event_task::spawn().ok();
     }
 
-    // ===== EXTI15_10 中断 (PB14 = HUSB238A INT) =====
+    // ===== HUSB238A 中断处理任务 =====
+    // 读取并清除 HUSB238A 中断锁存，更新 board_event
+    #[task(priority = 3, shared = [i2c1, board_event])]
+    async fn husb_interrupt_task(mut ctx: husb_interrupt_task::Context) {
+        use embedded_husb238a::Husb238a;
+
+        // 读取并清除 HUSB238A 中断锁存
+        ctx.shared.i2c1.lock(|i2c| {
+            let mut husb = Husb238a::new(i2c);
+            match husb.read_interrupts() {
+                Ok(_status) => {
+                    defmt::info!("HUSB238A interrupt cleared");
+                }
+                Err(_e) => {
+                    defmt::warn!("HUSB238A read_interrupts failed");
+                }
+            }
+        });
+
+        // 触发事件上报
+        event_task::spawn().ok();
+    }
+
+    // ===== EXTI15_10 中断 (PB14 = HUSB238A INT_N) =====
+    // 下降沿触发，spawn husb_interrupt_task 处理中断
     #[task(priority = 3, binds = EXTI15_10)]
     fn exti15_10_task(_ctx: exti15_10_task::Context) {
         // 清除 EXTI14 pending bit (写 1 清除)
         let exti = unsafe { &*stm32f4xx_hal::pac::EXTI::ptr() };
         exti.pr().write(|w| w.pr14().clear_bit_by_one());
 
-        defmt::info!("EXTI15_10: HUSB238A INT");
-        event_task::spawn().ok();
+        defmt::info!("EXTI15_10: HUSB238A INT_N triggered");
+        // spawn 异步任务来读取并清除 HUSB238A 中断
+        husb_interrupt_task::spawn().ok();
     }
 
     // ===== Task 9: 日志 =====

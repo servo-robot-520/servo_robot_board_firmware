@@ -122,13 +122,13 @@ pub fn init_tim1_dma(tim1: &TIM1) {
     //   CIRC[8]      = 0   (one-shot mode)
     stream.cr().write(|w| unsafe {
         w.chsel()
-            .bits(6)  // Channel 6 (TIM1_UP)
+            .bits(6) // Channel 6 (TIM1_UP)
             .dir()
-            .bits(1)  // Memory-to-peripheral
+            .bits(1) // Memory-to-peripheral
             .msize()
-            .bits(1)  // 16-bit
+            .bits(1) // 16-bit
             .psize()
-            .bits(1)  // 16-bit
+            .bits(1) // 16-bit
             .minc()
             .set_bit() // Memory address increment
     });
@@ -160,14 +160,8 @@ pub fn send_colors(colors: &[Color]) {
     tim1.cr1().modify(|_, w| w.cen().clear_bit());
 
     // Clear any pending stream 5 flags (TC, HT, TE)
-    dma2.hifcr().write(|w| {
-        w.ctcif5()
-            .set_bit()
-            .chtif5()
-            .set_bit()
-            .cteif5()
-            .set_bit()
-    });
+    dma2.hifcr()
+        .write(|w| w.ctcif5().set_bit().chtif5().set_bit().cteif5().set_bit());
 
     // Encode GRB color data into the static DMA buffer
     let buf = unsafe { &mut *core::ptr::addr_of_mut!(WS2812_DMA_BUF) };

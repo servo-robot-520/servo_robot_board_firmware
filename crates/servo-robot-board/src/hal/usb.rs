@@ -137,7 +137,8 @@ impl FirmwareReceiver {
             3..TOTAL_SECTORS => {
                 let flash_offset = ((lba - DATA_START_SECTOR) * SECTOR_SIZE as u32) as usize;
                 if flash_offset < self.firmware_size as usize {
-                    let addr = flash::OTA_TEMP_ADDR + flash::OTA_IMAGE_HEADER_SIZE + flash_offset as u32;
+                    let addr =
+                        flash::OTA_TEMP_ADDR + flash::OTA_IMAGE_HEADER_SIZE + flash_offset as u32;
                     let end = (flash_offset + SECTOR_SIZE).min(self.firmware_size as usize);
                     let len = end - flash_offset;
                     flash::read_flash(addr, &mut buf[..len]);
@@ -199,9 +200,8 @@ impl FirmwareReceiver {
                         // 传输完成: 从 Flash 读取末尾 4 字节作为 CRC32,
                         // 并回填 Header 中的 image_size 和 image_crc32
                         let image_size = self.firmware_size - 4;
-                        let crc_addr = flash::OTA_TEMP_ADDR
-                            + flash::OTA_IMAGE_HEADER_SIZE
-                            + image_size;
+                        let crc_addr =
+                            flash::OTA_TEMP_ADDR + flash::OTA_IMAGE_HEADER_SIZE + image_size;
                         let mut crc_buf = [0u8; 4];
                         flash::read_flash(crc_addr, &mut crc_buf);
                         let image_crc32 = u32::from_le_bytes(crc_buf);

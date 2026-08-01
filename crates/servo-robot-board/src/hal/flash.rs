@@ -138,8 +138,7 @@ pub fn validate_ota_image(flash: &FLASH) -> Result<OtaImageHeader, OtaValidation
     let mut header_buf = [0u8; OTA_IMAGE_HEADER_SIZE as usize];
     read_flash(OTA_TEMP_ADDR, &mut header_buf);
 
-    let header = OtaImageHeader::from_bytes(&header_buf)
-        .ok_or(OtaValidationError::ReadError)?;
+    let header = OtaImageHeader::from_bytes(&header_buf).ok_or(OtaValidationError::ReadError)?;
 
     // 读取字段到局部变量 (packed struct 不能直接引用)
     let magic = header.magic;
@@ -179,7 +178,11 @@ pub fn validate_ota_image(flash: &FLASH) -> Result<OtaImageHeader, OtaValidation
         return Err(OtaValidationError::CrcMismatch);
     }
 
-    defmt::info!("OTA: image validated (size={}, crc=0x{:08X})", image_size, image_crc32);
+    defmt::info!(
+        "OTA: image validated (size={}, crc=0x{:08X})",
+        image_size,
+        image_crc32
+    );
     Ok(header)
 }
 
@@ -565,24 +568,38 @@ fn serialize_config_to_buf(config: &BoardConfigSnapshot, buf: &mut [u8]) -> usiz
     let mut o = 0;
 
     // === Switches (0x10~0x13) ===
-    buf[o] = config.power_servo_on as u8; o += 1;
-    buf[o] = config.power_5v_on as u8; o += 1;
-    buf[o] = config.charge_on as u8; o += 1;
-    buf[o] = config.bat_ext_out_on as u8; o += 1;
+    buf[o] = config.power_servo_on as u8;
+    o += 1;
+    buf[o] = config.power_5v_on as u8;
+    o += 1;
+    buf[o] = config.charge_on as u8;
+    o += 1;
+    buf[o] = config.bat_ext_out_on as u8;
+    o += 1;
 
     // === Charge settings (0x20~0x21) ===
-    buf[o] = config.charge_stop_percentage; o += 1;
-    buf[o] = config.tx_log_level as u8; o += 1;
+    buf[o] = config.charge_stop_percentage;
+    o += 1;
+    buf[o] = config.tx_log_level as u8;
+    o += 1;
 
     // === Limits (0x30~0x37) ===
-    buf[o..o + 2].copy_from_slice(&config.servo_current_limit_ma.to_le_bytes()); o += 2;
-    buf[o..o + 2].copy_from_slice(&config.servo_temp_limit.to_le_bytes()); o += 2;
-    buf[o..o + 2].copy_from_slice(&config.temp_5v_limit.to_le_bytes()); o += 2;
-    buf[o..o + 2].copy_from_slice(&config.charge_max_current_ma.to_le_bytes()); o += 2;
-    buf[o..o + 2].copy_from_slice(&config.charge_temp_derating.to_le_bytes()); o += 2;
-    buf[o..o + 2].copy_from_slice(&config.charge_temp_limit.to_le_bytes()); o += 2;
-    buf[o..o + 2].copy_from_slice(&config.charge_stop_voltage_mv.to_le_bytes()); o += 2;
-    buf[o..o + 4].copy_from_slice(&config.servo_baud_rate.to_le_bytes()); o += 4;
+    buf[o..o + 2].copy_from_slice(&config.servo_current_limit_ma.to_le_bytes());
+    o += 2;
+    buf[o..o + 2].copy_from_slice(&config.servo_temp_limit.to_le_bytes());
+    o += 2;
+    buf[o..o + 2].copy_from_slice(&config.temp_5v_limit.to_le_bytes());
+    o += 2;
+    buf[o..o + 2].copy_from_slice(&config.charge_max_current_ma.to_le_bytes());
+    o += 2;
+    buf[o..o + 2].copy_from_slice(&config.charge_temp_derating.to_le_bytes());
+    o += 2;
+    buf[o..o + 2].copy_from_slice(&config.charge_temp_limit.to_le_bytes());
+    o += 2;
+    buf[o..o + 2].copy_from_slice(&config.charge_stop_voltage_mv.to_le_bytes());
+    o += 2;
+    buf[o..o + 4].copy_from_slice(&config.servo_baud_rate.to_le_bytes());
+    o += 4;
 
     o
 }
