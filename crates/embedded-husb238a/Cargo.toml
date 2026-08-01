@@ -1,0 +1,13 @@
+[package]
+name = "embedded-husb238a"
+version.workspace = true
+edition.workspace = true
+description = "HUSB238A USB PD Sink Controller driver"
+
+[features]
+default = []
+defmt-03 = ["dep:defmt"]
+
+[dependencies]
+embedded-hal.workspace = true
+defmt = { workspace = true, optional = true }

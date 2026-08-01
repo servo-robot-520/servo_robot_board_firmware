@@ -1,0 +1,60 @@
+[package]
+name = "servo-robot-board"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# 机器人协议包 (使用本地最新版本)
+servo-robot-protocol = {
+    path = "/mnt/LinuxData/Projects/embedded/servo_robot_board_tools/crates/servo-robot-protocol",
+    default-features = false,
+    features = ["embedded"]
+}
+#servo-robot-protocol = { git = "https://github.com/greenhand520/servo_robot_board_tools",
+#    branch = "main", default-features = false, features = ["embedded"] }
+
+# Cortex-M核心
+cortex-m = { version = "0.7.6", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7.1"
+
+# RTIC框架
+rtic = { version = "2.1.1", features = ["thumbv7-backend", "rtic-monotonics"] }
+rtic-sync = "1.4.0"
+
+# STM32F4 HAL
+stm32f4xx-hal = { version = "0.23.0", features = ["stm32f411", "usb_fs"] }
+stm32f4 = { version = "0.16.0", features = ["stm32f411"] }
+
+# 嵌入式HAL
+embedded-hal = "1.0.0"
+defmt.workspace = true
+libm = "0.2"
+embedded-alloc = "0.7"
+static_cell = "2"
+
+embedded-ina219 = { path = "../embedded-ina219" }
+embedded-mpu6500 = { path = "../embedded-mpu6500" }
+embedded-husb238a = { path = "../embedded-husb238a" }
+embedded-bq24725 = { path = "../embedded-bq24725" }
+embedded-bq40z50 = { path = "../embedded-bq40z50" }
+
+# USB
+usb-device = "0.3"
+usbd-serial = "0.2"
+usbd-storage = { version = "3.0", default-features = false, features = ["scsi", "bbb"] }
+
+# 调试和日志
+defmt-rtt = "1.3.0"
+
+# Panic处理
+panic-halt = "1.0.0"
+
+[features]
+default = ["uart-connect"]
+uart-connect = []
+usb-connect = []
+
+[[bin]]
+name = "servo-robot-board"
+test = false
+bench = false

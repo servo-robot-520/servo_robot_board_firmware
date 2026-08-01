@@ -1,0 +1,14 @@
+[package]
+name = "embedded-bq40z50"
+version.workspace = true
+edition.workspace = true
+description = "BQ40Z50 Smart Battery Gauge driver (SMBus)"
+
+[features]
+default = []
+defmt-03 = ["dep:defmt"]
+
+[dependencies]
+embedded-hal.workspace = true
+defmt = { workspace = true, optional = true }
+

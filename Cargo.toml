@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/servo-robot-board",
+    "crates/embedded-husb238a",
+    "crates/embedded-bq24725",
+    "crates/embedded-bq40z50",
+    "crates/embedded-ina219",
+    "crates/embedded-mpu6500",
+    "crates/servo-robot-board-bootloader",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3"
+
+[workspace.dependencies]
+embedded-hal = "1.0.0"
+defmt = "1.1.1"
+bitflags = "2.13.0"
+
+[profile.dev]
+opt-level = 1  # 最低优化，显著减小体积，调试体验基本不变

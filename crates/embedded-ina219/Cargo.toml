@@ -1,0 +1,14 @@
+[package]
+name = "embedded-ina219"
+version.workspace = true
+edition.workspace = true
+description = "INA219 current/power monitor driver (simplified, direct register access)"
+
+[features]
+default = []
+defmt-03 = ["dep:defmt"]
+
+[dependencies]
+embedded-hal.workspace = true
+defmt = { workspace = true, optional = true }
+

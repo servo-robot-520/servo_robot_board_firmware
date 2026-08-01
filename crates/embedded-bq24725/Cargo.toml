@@ -1,0 +1,13 @@
+[package]
+name = "embedded-bq24725"
+version.workspace = true
+edition.workspace = true
+description = "BQ24725 SMBus Battery Charge Controller driver"
+
+[features]
+default = []
+defmt-03 = ["dep:defmt"]
+
+[dependencies]
+embedded-hal.workspace = true
+defmt = { workspace = true, optional = true }

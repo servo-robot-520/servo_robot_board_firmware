@@ -1,0 +1,13 @@
+[package]
+name = "embedded-mpu6500"
+version.workspace = true
+edition.workspace = true
+description = "MPU6500 6-axis IMU SPI driver"
+
+[features]
+default = []
+defmt-03 = ["dep:defmt"]
+
+[dependencies]
+embedded-hal.workspace = true
+defmt = { workspace = true, optional = true }
