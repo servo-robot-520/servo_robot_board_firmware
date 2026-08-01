@@ -330,7 +330,7 @@ mod app {
         let _husb_int = gpiob.pb14.into_pull_up_input();
 
         // EXTI 外部中断配置: PB5 (BC_ACOK) 和 PB14 (HUSB238A INT_N)
-        // PB5 (BC_ACOK): 上升沿触发（充电器连接）
+        // PB5 (BC_ACOK): 双边沿触发（充电器连接/断开）
         // PB14 (HUSB238A INT_N): 下降沿触发（低有效中断）
         {
             let syscfg = unsafe { &*stm32f4xx_hal::pac::SYSCFG::ptr() };
@@ -340,9 +340,9 @@ mod app {
             syscfg.exticr4().modify(|_, w| w.exti14().pb());
 
             let exti = unsafe { &*stm32f4xx_hal::pac::EXTI::ptr() };
-            // PB5 上升沿, PB14 下降沿
+            // PB5 双边沿 (上升+下降), PB14 下降沿
             exti.rtsr().modify(|_, w| w.tr5().set_bit());
-            exti.ftsr().modify(|_, w| w.tr14().set_bit());
+            exti.ftsr().modify(|_, w| w.tr5().set_bit().tr14().set_bit());
             // 使能中断
             exti.imr().modify(|_, w| w.mr5().set_bit().mr14().set_bit());
 
@@ -352,7 +352,7 @@ mod app {
                 cortex_m::peripheral::NVIC::unmask(stm32f4xx_hal::pac::Interrupt::EXTI15_10);
             }
         }
-        defmt::info!("EXTI configured: PB5 (BC_ACOK rising), PB14 (HUSB238A INT_N falling)");
+        defmt::info!("EXTI configured: PB5 (BC_ACOK both edges), PB14 (HUSB238A INT_N falling)");
 
         // ADC GPIO: PA0, PA1, PA4 = 模拟输入; PB0, PB1 = 模拟输入
         {
@@ -422,7 +422,17 @@ mod app {
         // I2C1 (PB6=SCL, PB7=SDA)
         let scl1 = gpiob.pb6.into_alternate_open_drain();
         let sda1 = gpiob.pb7.into_alternate_open_drain();
-        let i2c1 = I2c::new(dp.I2C1, (scl1, sda1), 400.kHz(), &mut rcc);
+        let mut i2c1 = I2c::new(dp.I2C1, (scl1, sda1), 400.kHz(), &mut rcc);
+
+        // 初始化 HUSB238A (解除中断屏蔽)
+        {
+            use embedded_husb238a::Husb238a;
+            let mut husb = Husb238a::new(&mut i2c1);
+            match husb.init() {
+                Ok(()) => defmt::info!("HUSB238A initialized"),
+                Err(_e) => defmt::warn!("HUSB238A init failed"),
+            }
+        }
 
         // SPI1 (PA5=SCK, PA6=MISO, PA7=MOSI) + CS=PB2
         let sck = gpioa.pa5.into_alternate();
@@ -927,21 +937,27 @@ mod app {
     async fn husb_interrupt_task(mut ctx: husb_interrupt_task::Context) {
         use embedded_husb238a::Husb238a;
 
-        // 读取并清除 HUSB238A 中断锁存
-        ctx.shared.i2c1.lock(|i2c| {
+        // 读取并清除 HUSB238A 中断锁存，获取中断状态
+        let status = ctx.shared.i2c1.lock(|i2c| {
             let mut husb = Husb238a::new(i2c);
-            match husb.read_interrupts() {
-                Ok(_status) => {
-                    defmt::info!("HUSB238A interrupt cleared");
+            match husb.handle_interrupt() {
+                Ok(status) => {
+                    defmt::info!("HUSB238A interrupt handled");
+                    Some(status)
                 }
                 Err(_e) => {
-                    defmt::warn!("HUSB238A read_interrupts failed");
+                    defmt::warn!("HUSB238A handle_interrupt failed");
+                    None
                 }
             }
         });
 
-        // 触发事件上报
-        event_task::spawn().ok();
+        // 根据中断状态更新 board_event
+        if let Some(_status) = status {
+            // HUSB238A 状态已由驱动内部更新
+            // 触发事件上报
+            event_task::spawn().ok();
+        }
     }
 
     // ===== EXTI15_10 中断 (PB14 = HUSB238A INT_N) =====
