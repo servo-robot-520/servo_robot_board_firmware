@@ -53,8 +53,15 @@ fn crc32_compute(base: u32, size: u32) -> u32 {
     let mut offset = 0u32;
     while offset < size {
         let word = read_u32(base + offset);
-        for byte in word.to_le_bytes() {
-            crc ^= byte as u32;
+        let bytes = word.to_le_bytes();
+        let remaining = size - offset;
+        let bytes_to_process = if remaining >= 4 {
+            4
+        } else {
+            remaining as usize
+        };
+        for i in 0..bytes_to_process {
+            crc ^= bytes[i] as u32;
             for _ in 0..8 {
                 if crc & 1 != 0 {
                     crc = (crc >> 1) ^ 0xEDB8_8320;
@@ -65,7 +72,7 @@ fn crc32_compute(base: u32, size: u32) -> u32 {
         }
         offset += 4;
     }
-    crc ^ 0xFFFF_FFFF
+    !crc
 }
 
 fn wait_flash(flash: &stm32f411::FLASH) -> Result<(), FlashError> {
@@ -80,7 +87,9 @@ fn wait_flash(flash: &stm32f411::FLASH) -> Result<(), FlashError> {
     let sr = flash.sr().read();
     if sr.pgperr().bit_is_set() || sr.pgaerr().bit_is_set() || sr.wrperr().bit_is_set() {
         // Clear error flags
-        flash.sr().write(|w| unsafe { w.bits(1 << 6 | 1 << 5 | 1 << 4) });
+        flash
+            .sr()
+            .write(|w| unsafe { w.bits(1 << 6 | 1 << 5 | 1 << 4) });
         return Err(FlashError::ProgramError);
     }
     Ok(())
@@ -132,11 +141,31 @@ fn copy_ota_to_app(flash: &stm32f411::FLASH, size: u32) -> Result<(), FlashError
     // 跳过 OtaImageHeader, 从固件数据开始拷贝
     let src_base = OTA_TEMP_ADDR + OTA_IMAGE_HEADER_SIZE;
     let mut offset = 0u32;
-    while offset < size {
+
+    // 按 4 字节对齐拷贝（Flash 最小写入单位）
+    // 对于末尾不足 4 字节的部分，读取完整 word 但只写入有效字节
+    let aligned_size = size & !3; // 向下对齐到 4 字节
+    let tail_bytes = size - aligned_size; // 末尾剩余字节 (0-3)
+
+    // 拷贝完整的 4 字节 word
+    while offset < aligned_size {
         let word = read_u32(src_base + offset);
         write_word(flash, APP_ADDR + offset, word)?;
         offset += 4;
     }
+
+    // 处理末尾不足 4 字节（如果有的话）
+    // 保留低 tail_bytes 字节，高位设为 0xFF（擦除状态）
+    if tail_bytes > 0 {
+        let word = read_u32(src_base + aligned_size);
+        // 构造掩码：低 tail_bytes 字节保留，高位设为 0xFF
+        // 例如 tail_bytes=1: padding_mask = 0xFFFFFF00, 保留低 1 字节
+        // 例如 tail_bytes=2: padding_mask = 0xFFFF0000, 保留低 2 字节
+        let padding_mask = !((1u32 << (tail_bytes * 8)) - 1);
+        let padded_word = word | padding_mask;
+        write_word(flash, APP_ADDR + aligned_size, padded_word)?;
+    }
+
     Ok(())
 }
 
@@ -180,8 +209,8 @@ fn main() -> ! {
 
     if ota_flag == OTA_PENDING {
         // 解析 OtaImageHeader
-        let header_word0 = read_u32(OTA_TEMP_ADDR);      // magic
-        let header_word1 = read_u32(OTA_TEMP_ADDR + 4);   // format_version(8) | target_mcu(8) | _reserved(16)
+        let header_word0 = read_u32(OTA_TEMP_ADDR); // magic
+        let header_word1 = read_u32(OTA_TEMP_ADDR + 4); // format_version(8) | target_mcu(8) | _reserved(16)
         let image_size = read_u32(OTA_TEMP_ADDR + 8);
         let image_crc32 = read_u32(OTA_TEMP_ADDR + 12);
 
@@ -194,22 +223,35 @@ fn main() -> ! {
             && image_size > 0
             && image_size <= APP_MAX_SIZE
         {
-            unlock_flash(flash);
-            if copy_ota_to_app(flash, image_size).is_ok() {
-                // Verify CRC32 of the copied image
-                let computed_crc = crc32_compute(APP_ADDR, image_size);
-                if computed_crc == image_crc32 {
-                    let _ = clear_ota_flag(flash);
-                } else {
-                    // CRC mismatch — invalidate: erase app so stale image cannot boot
-                    let _ = erase_sector(flash, 1);
-                    let _ = erase_sector(flash, 2);
-                    let _ = erase_sector(flash, 3);
-                    let _ = erase_sector(flash, 4);
-                    let _ = erase_sector(flash, 5);
+            // 验证源镜像 CRC（在擦除 App 之前）
+            let src_data_addr = OTA_TEMP_ADDR + OTA_IMAGE_HEADER_SIZE;
+            let source_crc = crc32_compute(src_data_addr, image_size);
+            if source_crc != image_crc32 {
+                // 源镜像 CRC 不匹配：不擦除 App；清除 Pending 标志后启动现有固件。
+                unlock_flash(flash);
+                let _ = clear_ota_flag(flash);
+                lock_flash(flash);
+            } else {
+                unlock_flash(flash);
+                if copy_ota_to_app(flash, image_size).is_ok() {
+                    // Verify CRC32 of the copied image
+                    let computed_crc = crc32_compute(APP_ADDR, image_size);
+                    if computed_crc == image_crc32 {
+                        if clear_ota_flag(flash).is_err() {
+                            // 无法清除 OTA 标志，设备将重试 OTA。
+                            // App 已写入有效固件，下次启动可恢复。
+                        }
+                    } else {
+                        // CRC mismatch — invalidate: erase app so stale image cannot boot
+                        let _ = erase_sector(flash, 1);
+                        let _ = erase_sector(flash, 2);
+                        let _ = erase_sector(flash, 3);
+                        let _ = erase_sector(flash, 4);
+                        let _ = erase_sector(flash, 5);
+                    }
                 }
+                lock_flash(flash);
             }
-            lock_flash(flash);
         }
     }
 
@@ -219,7 +261,18 @@ fn main() -> ! {
         let sp = read_u32(APP_ADDR);
         let reset_vector = read_u32(APP_ADDR + 4);
 
+        // 验证 MSP 在 SRAM 范围
         if sp < 0x2000_0000 || sp > 0x2002_0000 {
+            loop {
+                cortex_m::asm::wfi();
+            }
+        }
+
+        // 验证 reset vector 在 App Flash 范围且是 Thumb 地址
+        if reset_vector < APP_ADDR
+            || reset_vector > (APP_ADDR + APP_MAX_SIZE)
+            || (reset_vector & 1) == 0
+        {
             loop {
                 cortex_m::asm::wfi();
             }
