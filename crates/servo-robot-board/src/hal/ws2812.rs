@@ -1,0 +1,183 @@
+//! WS2812 LED driver via TIM1 CH2 + DMA2 Stream5
+//!
+//! Hardware configuration:
+//! - PA9 = TIM1 CH2 (AF1)
+//! - DMA2 Stream5 Channel6 (TIM1_UP update event)
+//! - PWM: 800kHz, period = 120 cycles at 96MHz
+//! - T0H = 42 cycles, T1H = 78 cycles
+//!
+//! Each WS2812 data bit is encoded as one PWM period with
+//! different duty cycles for 0 and 1 bits. The DMA transfers
+//! pre-encoded duty values from a static buffer to TIM1 CCR2
+//! on each timer update event. After all bits are clocked out,
+//! the DMA stream auto-disables (one-shot mode) and the timer
+//! output stays low, satisfying the WS2812 reset condition (>50µs).
+
+use stm32f4xx_hal::pac::{DMA2, TIM1};
+
+use crate::ws2812::{self, Color, DMA_BUF_SIZE};
+
+/// Static DMA buffer (initialized to 0 = reset condition).
+/// Address must remain stable for the duration of the DMA transfer.
+static mut WS2812_DMA_BUF: [u16; DMA_BUF_SIZE] = [0; DMA_BUF_SIZE];
+
+/// Initialize TIM1 CH2 for WS2812 PWM output and DMA2 Stream5
+/// for automatic data transfer.
+///
+/// After this call, TIM1 and DMA are configured but stopped.
+/// Use [`send_colors`] to encode LED data and start a transfer.
+///
+/// # Prerequisites
+/// - GPIOA clock must be enabled
+/// - TIM1 clock must be enabled (RCC APB2ENR.TIM1EN)
+/// - DMA2 clock must be enabled (RCC AHB1ENR.DMA2EN)
+pub fn init_tim1_dma(tim1: &TIM1) {
+    // --- Configure PA9 as AF1 (TIM1 CH2) ---
+    {
+        let gpioa = unsafe { &*stm32f4xx_hal::pac::GPIOA::ptr() };
+        // AFRH[11:8] = AF1 for PA9
+        gpioa.afrh().modify(|_, w| unsafe { w.afrh9().bits(1) });
+        // MODER[19:18] = 10 (alternate function)
+        gpioa.moder().modify(|_, w| w.moder9().alternate());
+        // OTYPER[9] = 0 (push-pull)
+        gpioa.otyper().modify(|_, w| w.ot9().push_pull());
+        // OSPEEDR[19:18] = 11 (very high speed for clean WS2812 edges)
+        gpioa
+            .ospeedr()
+            .modify(|_, w| w.ospeedr9().very_high_speed());
+    }
+
+    // --- TIM1 Configuration ---
+    // Disable timer before reconfiguration
+    tim1.cr1().modify(|_, w| w.cen().clear_bit());
+
+    // Prescaler = 0 → timer clock = APB2 = 96MHz
+    tim1.psc().write(|w| unsafe { w.psc().bits(0) });
+    // Auto-reload = 119 → period = 120 cycles = 1.25µs (800kHz)
+    tim1.arr().write(|w| unsafe { w.arr().bits(119) });
+    // Initial duty = 0 (output low)
+    tim1.ccr2().write(|w| unsafe { w.ccr().bits(0) });
+
+    // CCMR1 (output mode): CH2 → PWM mode 1, preload enable
+    //   OC2M[14:12] = 110 (PWM mode 1)
+    //   OC2PE[11] = 1 (preload enable, CCR2 latched at update event)
+    tim1.ccmr1_output()
+        .modify(|_, w| unsafe { w.oc2m().bits(6).oc2pe().set_bit() });
+
+    // CCER: enable CH2 output
+    //   CC2E[4] = 1
+    tim1.ccer().modify(|_, w| w.cc2e().set_bit());
+
+    // BDTR: main output enable (required for advanced timer TIM1)
+    //   MOE[15] = 1
+    tim1.bdtr().modify(|_, w| w.moe().set_bit());
+
+    // DIER: update DMA request enable
+    //   UDE[8] = 1 → DMA request on each update (overflow) event
+    tim1.dier().modify(|_, w| w.ude().set_bit());
+
+    // CR1: auto-reload preload enable
+    //   ARPE[7] = 1
+    tim1.cr1().modify(|_, w| w.arpe().set_bit());
+
+    // --- DMA2 Stream5 Channel6 Configuration ---
+    let dma2 = unsafe { &*DMA2::ptr() };
+    let stream = dma2.st(5);
+
+    // Disable stream before reconfiguration
+    stream.cr().modify(|_, w| w.en().clear_bit());
+    while stream.cr().read().en().bit_is_set() {}
+
+    // Clear all stream 5 status flags
+    dma2.hifcr().write(|w| {
+        w.cfeif5()
+            .set_bit()
+            .cdmeif5()
+            .set_bit()
+            .cteif5()
+            .set_bit()
+            .chtif5()
+            .set_bit()
+            .ctcif5()
+            .set_bit()
+    });
+
+    // Peripheral address: TIM1 CCR2 register
+    let ccr2_addr = &tim1.ccr2() as *const _ as u32;
+    stream.par().write(|w| unsafe { w.pa().bits(ccr2_addr) });
+
+    // Stream control register:
+    //   CHSEL[27:25] = 110 (channel 6 = TIM1_UP)
+    //   DIR[7:6]     = 01  (memory → peripheral)
+    //   MSIZE[14:13] = 01  (16-bit memory)
+    //   PSIZE[11:10] = 01  (16-bit peripheral)
+    //   MINC[10]     = 1   (memory address increment)
+    //   PINC[9]      = 0   (peripheral address fixed)
+    //   CIRC[8]      = 0   (one-shot mode)
+    stream.cr().write(|w| unsafe {
+        w.chsel()
+            .bits(6)  // Channel 6 (TIM1_UP)
+            .dir()
+            .bits(1)  // Memory-to-peripheral
+            .msize()
+            .bits(1)  // 16-bit
+            .psize()
+            .bits(1)  // 16-bit
+            .minc()
+            .set_bit() // Memory address increment
+    });
+    // Note: stream and timer are NOT enabled here.
+    // send_colors() will configure the buffer address/length and start.
+}
+
+/// Start a DMA transfer to update the WS2812 LEDs.
+///
+/// Encodes `colors` into the static DMA buffer using [`ws2812::encode_colors`],
+/// then starts a one-shot DMA transfer from memory to TIM1 CCR2.
+/// The timer clocks out one PWM period per DMA word, and the DMA stream
+/// auto-disables when the transfer count reaches zero.
+///
+/// If a previous transfer is still in progress, this call is a no-op.
+/// Since the main update source (`bat_task`) runs at 10 Hz, any dropped
+/// frame is corrected on the next cycle.
+pub fn send_colors(colors: &[Color]) {
+    let dma2 = unsafe { &*DMA2::ptr() };
+    let tim1 = unsafe { &*TIM1::ptr() };
+    let stream = dma2.st(5);
+
+    // If DMA stream is still running from a previous transfer, skip
+    if stream.cr().read().en().bit_is_set() {
+        return;
+    }
+
+    // Stop timer so the data line idles low
+    tim1.cr1().modify(|_, w| w.cen().clear_bit());
+
+    // Clear any pending stream 5 flags (TC, HT, TE)
+    dma2.hifcr().write(|w| {
+        w.ctcif5()
+            .set_bit()
+            .chtif5()
+            .set_bit()
+            .cteif5()
+            .set_bit()
+    });
+
+    // Encode GRB color data into the static DMA buffer
+    let buf = unsafe { &mut *core::ptr::addr_of_mut!(WS2812_DMA_BUF) };
+    ws2812::encode_colors(colors, buf);
+
+    // Point DMA at the buffer and set the transfer length
+    let buf_ptr = unsafe { (*core::ptr::addr_of!(WS2812_DMA_BUF)).as_ptr() } as u32;
+    stream.m0ar().write(|w| unsafe { w.m0a().bits(buf_ptr) });
+    stream
+        .ndtr()
+        .write(|w| unsafe { w.ndt().bits(DMA_BUF_SIZE as u16) });
+
+    // Enable DMA stream (will wait for TIM1 update requests)
+    stream.cr().modify(|_, w| w.en().set_bit());
+
+    // Reset counter and start the timer
+    tim1.cnt().write(|w| unsafe { w.cnt().bits(0) });
+    tim1.cr1().modify(|_, w| w.cen().set_bit());
+}

@@ -13,14 +13,14 @@ pub const LED_COUNT: usize = 3;
 /// PWM 频率: 800kHz → 周期 1.25μs
 /// 在 96MHz APB2 时钟下, 预分频 0, 周期 = 120 个计数
 const PWM_PERIOD: u16 = 120;
-/// 0 bit: 高电平 ~350ns → 28 计数
-const PWM_ZERO: u16 = 28;
-/// 1 bit: 高电平 ~700ns → 56 计数
-const PWM_ONE: u16 = 56;
-/// Reset: 低电平 >50μs → 40 个 PWM 周期 (通过 DMA 发送 0)
+/// 0 bit: 高电平 ~350ns → 42 计数 (0.35µs * 96 + 10 余量)
+const PWM_ZERO: u16 = 42;
+/// 1 bit: 高电平 ~700ns → 78 计数 (0.7µs * 96 + 10 余量)
+const PWM_ONE: u16 = 78;
+/// Reset: 低电平 >50μs → 50 个 PWM 周期 (50 × 1.25µs = 62.5µs)
 
-/// DMA 缓冲区大小: 24 bits × LED_COUNT + reset (8 周期)
-pub const DMA_BUF_SIZE: usize = 24 * LED_COUNT + 8;
+/// DMA 缓冲区大小: 24 bits × LED_COUNT + reset (50 周期)
+pub const DMA_BUF_SIZE: usize = 24 * LED_COUNT + 50;
 
 /// GRB 颜色
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,7 +49,7 @@ impl Color {
 /// 将颜色编码为 DMA PWM 缓冲区
 ///
 /// `colors`: LED 颜色数组 (GRB 顺序)
-/// `buf`: DMA 缓冲区, 大小至少 24 * LED_COUNT + 8
+/// `buf`: DMA 缓冲区, 大小至少 `DMA_BUF_SIZE` (24 * LED_COUNT + 50)
 pub fn encode_colors(colors: &[Color], buf: &mut [u16]) {
     let led_count = colors.len().min(LED_COUNT);
     let mut pos = 0;

@@ -175,6 +175,7 @@ mod app {
         power_data: PowerData,
         battery_state: BatteryState,
         board_event: BoardEvent,
+        prev_board_event: BoardEvent,
         system_info: SystemInfo,
         config: BoardConfigSnapshot,
         pwr_servo_en: gpioc::PC13<Output<PushPull>>,
@@ -217,6 +218,7 @@ mod app {
         mpu6500: embedded_mpu6500::Mpu6500<
             MpuSpiDevice<stm32f4xx_hal::spi::Spi<pac::SPI1>, gpiob::PB2<Output<PushPull>>>,
         >,
+        imu_filter: domain::imu::MahonyFilter,
         usb_rx_buf: [u8; 512],
         usb_rx_pos: usize,
         ota_writer: services::ota::OtaWriter,
@@ -253,9 +255,16 @@ mod app {
 
         // 外设时钟使能 (必须在 RCC.constrain() 之前)
         dp.RCC.apb1enr().modify(|_, w| w.usart2en().set_bit());
-        dp.RCC
-            .apb2enr()
-            .modify(|_, w| w.usart1en().set_bit().adc1en().set_bit());
+        dp.RCC.apb2enr().modify(|_, w| {
+            w.usart1en()
+                .set_bit()
+                .adc1en()
+                .set_bit()
+                .tim1en()
+                .set_bit()
+                .syscfgen()
+                .set_bit()
+        });
         dp.RCC.ahb1enr().modify(|_, w| w.dma2en().set_bit());
 
         let rcc = dp.RCC.constrain();
@@ -317,6 +326,32 @@ mod app {
         let pwr_key = gpiob.pb13.into_push_pull_output();
         let servo_tx_en = gpiob.pb12.into_push_pull_output();
         let bc_acok = gpiob.pb5.into_pull_down_input();
+        let _husb_int = gpiob.pb14.into_pull_down_input();
+
+        // EXTI 外部中断配置: PB5 (BC_ACOK) 和 PB14 (HUSB238A INT)
+        // 上升沿触发，用于检测充电器连接和 USB PD 事件
+        {
+            let syscfg = unsafe { &*stm32f4xx_hal::pac::SYSCFG::ptr() };
+            // EXTICR2: EXTI5 = PB (1) — PB5 = BC_ACOK
+            syscfg.exticr2().modify(|_, w| w.exti5().pb());
+            // EXTICR4: EXTI14 = PB (1) — PB14 = HUSB238A INT
+            syscfg.exticr4().modify(|_, w| w.exti14().pb());
+
+            let exti = unsafe { &*stm32f4xx_hal::pac::EXTI::ptr() };
+            // 上升沿触发
+            exti.rtsr().modify(|_, w| w.tr5().set_bit().tr14().set_bit());
+            // 不触发下降沿
+            exti.ftsr().modify(|_, w| w.tr5().clear_bit().tr14().clear_bit());
+            // 使能中断
+            exti.imr().modify(|_, w| w.mr5().set_bit().mr14().set_bit());
+
+            // 使能 NVIC 中断
+            unsafe {
+                cortex_m::peripheral::NVIC::unmask(stm32f4xx_hal::pac::Interrupt::EXTI9_5);
+                cortex_m::peripheral::NVIC::unmask(stm32f4xx_hal::pac::Interrupt::EXTI15_10);
+            }
+        }
+        defmt::info!("EXTI configured: PB5 (BC_ACOK), PB14 (HUSB238A INT)");
 
         // ADC GPIO: PA0, PA1, PA4 = 模拟输入; PB0, PB1 = 模拟输入
         {
@@ -474,6 +509,10 @@ mod app {
             hal::adc::ADC_CHANNEL_COUNT
         );
 
+        // WS2812 LED: TIM1 CH2 (PA9) + DMA2 Stream5
+        hal::ws2812::init_tim1_dma(&dp.TIM1);
+        defmt::info!("WS2812 initialized (TIM1 CH2 + DMA2 Stream5)");
+
         defmt::info!("Servo Robot Board initialized");
 
         (
@@ -483,6 +522,7 @@ mod app {
                 power_data: PowerData::default(),
                 battery_state: BatteryState::default(),
                 board_event: BoardEvent::default(),
+                prev_board_event: BoardEvent::default(),
                 system_info: SystemInfo::default(),
                 config,
                 pwr_servo_en,
@@ -512,6 +552,7 @@ mod app {
             },
             Local {
                 mpu6500,
+                imu_filter: domain::imu::MahonyFilter::new(),
                 usb_rx_buf: [0u8; 512],
                 usb_rx_pos: 0,
                 ota_writer: services::ota::OtaWriter::new(),
@@ -527,10 +568,13 @@ mod app {
     }
 
     // ===== Task 1: IMU (100Hz) =====
-    #[task(priority = 4, local = [mpu6500], shared = [imu_data, frames_sent])]
+    #[task(priority = 4, local = [mpu6500, imu_filter], shared = [imu_data, frames_sent])]
     async fn imu_task(mut ctx: imu_task::Context) {
         let mpu = ctx.local.mpu6500;
-        match domain::imu::read_imu_data(mpu) {
+        let filter = ctx.local.imu_filter;
+        // 100 Hz → dt = 10 ms = 0.01 s
+        const IMU_DT: f32 = 0.01;
+        match domain::imu::read_imu_data(mpu, filter, IMU_DT) {
             Ok(imu) => {
                 ctx.shared.imu_data.lock(|d| *d = imu.clone());
                 ctx.shared.frames_sent.lock(|f| *f += 1);
@@ -576,6 +620,7 @@ mod app {
             e.protection_flags =
                 ProtectionFlags::from_bits(flags.to_u16()).unwrap_or(ProtectionFlags::empty());
         });
+        event_task::spawn().ok();
 
         ctx.shared.power_data.lock(|d| *d = data.clone());
         ctx.shared.frames_sent.lock(|f| *f += 1);
@@ -600,6 +645,7 @@ mod app {
         ctx.shared.ws2812_colors.lock(|c| {
             c[1] = ws2812::battery_soc_color(soc);
         });
+        led_task::spawn().ok();
 
         comm_tx_task::spawn(TypedFrame::Battery(bat_data)).ok();
     }
@@ -642,6 +688,7 @@ mod app {
         });
 
         ctx.shared.board_event.lock(|e| e.charge_phase = phase_enum);
+        event_task::spawn().ok();
     }
 
     // ===== Task 6: 通讯接收 =====
@@ -759,6 +806,7 @@ mod app {
                 hal::flash::save_config(&flash, &snapshot).ok();
 
                 comm_tx_task::spawn(TypedFrame::AckCfgWrite { success: true }).ok();
+                event_task::spawn().ok();
             }
             TypedFrame::ConfigQuery(ct) => {
                 let v = ctx
@@ -836,11 +884,41 @@ mod app {
         }
     }
 
-    // ===== Task 8: 事件 =====
-    #[task(priority = 2, shared = [board_event])]
+    // ===== Task 8: 事件 (触发式) =====
+    // 当 board_event 状态变化时由各任务 spawn，仅在有差异时发送事件帧
+    #[task(priority = 2, shared = [board_event, prev_board_event])]
     async fn event_task(mut ctx: event_task::Context) {
-        let e = ctx.shared.board_event.lock(|e| e.clone());
-        comm_tx_task::spawn(TypedFrame::Event(e)).ok();
+        let changed = ctx.shared.board_event.lock(|cur| {
+            ctx.shared.prev_board_event.lock(|prev| {
+                domain::event::diff_and_update(prev, cur)
+            })
+        });
+        if changed {
+            let e = ctx.shared.board_event.lock(|e| e.clone());
+            comm_tx_task::spawn(TypedFrame::Event(e)).ok();
+        }
+    }
+
+    // ===== EXTI9_5 中断 (PB5 = BC_ACOK) =====
+    #[task(priority = 3, binds = EXTI9_5, shared = [board_event])]
+    fn exti9_5_task(ctx: exti9_5_task::Context) {
+        // 清除 EXTI5 pending bit (写 1 清除)
+        let exti = unsafe { &*stm32f4xx_hal::pac::EXTI::ptr() };
+        exti.pr().write(|w| w.pr5().clear_bit_by_one());
+
+        defmt::info!("EXTI9_5: BC_ACOK changed");
+        event_task::spawn().ok();
+    }
+
+    // ===== EXTI15_10 中断 (PB14 = HUSB238A INT) =====
+    #[task(priority = 3, binds = EXTI15_10, shared = [board_event])]
+    fn exti15_10_task(ctx: exti15_10_task::Context) {
+        // 清除 EXTI14 pending bit (写 1 清除)
+        let exti = unsafe { &*stm32f4xx_hal::pac::EXTI::ptr() };
+        exti.pr().write(|w| w.pr14().clear_bit_by_one());
+
+        defmt::info!("EXTI15_10: HUSB238A INT");
+        event_task::spawn().ok();
     }
 
     // ===== Task 9: 日志 =====
@@ -963,11 +1041,13 @@ mod app {
             }
             e.error_flags = err;
         });
+        event_task::spawn().ok();
 
         // WS2812 LED[0]: 充电温度指示
         ctx.shared.ws2812_colors.lock(|c| {
             c[0] = ws2812::battery_temp_color(temp_charge);
         });
+        led_task::spawn().ok();
 
         // 组装 SystemInfo（包含温度数据）
         let info = ctx.shared.system_info.lock(|s| {
@@ -996,6 +1076,13 @@ mod app {
         });
 
         comm_tx_task::spawn(TypedFrame::System(info)).ok();
+    }
+
+    // ===== WS2812 LED 输出 =====
+    #[task(priority = 1, shared = [ws2812_colors])]
+    async fn led_task(mut ctx: led_task::Context) {
+        let colors = ctx.shared.ws2812_colors.lock(|c| *c);
+        hal::ws2812::send_colors(&colors);
     }
 
     // ===== USB 轮询 (中断) =====

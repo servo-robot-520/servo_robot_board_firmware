@@ -6,3 +6,4 @@ pub mod adc;
 pub mod flash;
 pub mod uart;
 pub mod usb;
+pub mod ws2812;
