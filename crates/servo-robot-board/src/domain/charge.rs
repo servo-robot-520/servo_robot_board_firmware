@@ -107,8 +107,12 @@ pub fn calc_charge_current_ma(
         return 0;
     }
     let current_ma = if charger_temp > charge_temp_derating {
-        let ratio = (charge_temp_limit - charger_temp) as f32
-            / (charge_temp_limit - charge_temp_derating) as f32;
+        let temp_range = charge_temp_limit - charge_temp_derating;
+        if temp_range <= 0 {
+            // 防止除零: 如果阈值配置错误，直接停止充电
+            return 0;
+        }
+        let ratio = (charge_temp_limit - charger_temp) as f32 / temp_range as f32;
         let ratio = ratio.clamp(0.0, 1.0);
         let reduced = (CHARGE_CURRENT_MIN_MA as f32
             + ratio * (current_ma as f32 - CHARGE_CURRENT_MIN_MA as f32))
@@ -379,24 +383,39 @@ where
     use embedded_bq24725::Bq24725;
 
     let mut charger = Bq24725::new(i2c);
+    // 注意: 范围错误 (OutOfRange) 不应该发生，因为调用者已验证输入范围。
+    // 如果驱动添加新的错误变体，编译器会警告此处未覆盖。
     charger
         .set_charge_current_ma(target_current_ma)
         .map_err(|e| match e {
             embedded_bq24725::Error::I2c(e) => e,
-            _ => unreachable!(),
+            // 范围错误是编程错误（输入已验证），不应在运行时发生
+            embedded_bq24725::Error::ChargeCurrentOutOfRange
+            | embedded_bq24725::Error::ChargeVoltageOutOfRange
+            | embedded_bq24725::Error::InputCurrentOutOfRange => {
+                unreachable!("BQ24725 range error with validated inputs")
+            }
         })?;
     charger
         .set_charge_voltage_mv(voltage_mv)
         .map_err(|e| match e {
             embedded_bq24725::Error::I2c(e) => e,
-            _ => unreachable!(),
+            embedded_bq24725::Error::ChargeCurrentOutOfRange
+            | embedded_bq24725::Error::ChargeVoltageOutOfRange
+            | embedded_bq24725::Error::InputCurrentOutOfRange => {
+                unreachable!("BQ24725 range error with validated inputs")
+            }
         })?;
     if input_current_ma > 0 {
         charger
             .set_input_current_ma(input_current_ma)
             .map_err(|e| match e {
                 embedded_bq24725::Error::I2c(e) => e,
-                _ => unreachable!(),
+                embedded_bq24725::Error::ChargeCurrentOutOfRange
+                | embedded_bq24725::Error::ChargeVoltageOutOfRange
+                | embedded_bq24725::Error::InputCurrentOutOfRange => {
+                    unreachable!("BQ24725 range error with validated inputs")
+                }
             })?;
     }
     Ok(())

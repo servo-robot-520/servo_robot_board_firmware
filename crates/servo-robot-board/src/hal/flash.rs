@@ -364,23 +364,26 @@ pub fn write_ota_flag(flash: &FLASH, flag: OtaFlag) -> Result<(), FlashError> {
 ///
 /// 读取当前扇区内容 → 修改目标字段 → 擦除 → 写回.
 /// 解决 OTA 标志与配置共用 Sector 7 时的擦除冲突.
+///
+/// 缓冲区大小 256 字节，足够容纳 OTA 标志(4B) + 保留(12B) + 配置头(8B) + 配置数据(24B+)
 pub fn save_metadata(
     flash: &FLASH,
     ota_flag: OtaFlag,
     config: Option<&BoardConfigSnapshot>,
 ) -> Result<(), FlashError> {
-    // 1. 读取当前扇区前 48 字节到 RAM
-    let mut sector_buf = [0u8; 48];
+    // 1. 读取当前扇区前 256 字节到 RAM（足够容纳元数据）
+    let mut sector_buf = [0u8; 256];
     read_flash(OTA_FLAG_ADDR, &mut sector_buf);
 
     // 2. 修改 OTA 标志
     let flag_bytes = (ota_flag as u32).to_le_bytes();
     sector_buf[0..4].copy_from_slice(&flag_bytes);
 
-    // 3. 修改配置（如果提供）
+    // 3. 修改配置（如果提供）—— 使用栈缓冲区，避免堆分配
     if let Some(cfg) = config {
-        let config_data = serialize_config(cfg);
-        let checksum = calc_checksum(&config_data);
+        let mut config_buf = [0u8; CONFIG_PAYLOAD_SIZE];
+        let config_len = serialize_config_to_buf(cfg, &mut config_buf);
+        let checksum = calc_checksum(&config_buf[..config_len]);
         let header = ConfigHeader {
             magic: CONFIG_MAGIC,
             version: CONFIG_VERSION,
@@ -394,23 +397,27 @@ pub fn save_metadata(
             )
         };
         sector_buf[16..24].copy_from_slice(header_bytes);
-        let copy_len = config_data.len().min(sector_buf.len() - 24);
-        sector_buf[24..24 + copy_len].copy_from_slice(&config_data[..copy_len]);
+        let copy_len = config_len.min(sector_buf.len() - 24);
+        sector_buf[24..24 + copy_len].copy_from_slice(&config_buf[..copy_len]);
     }
 
     // 4. 擦除扇区
     erase_user_data(flash)?;
 
-    // 5. 写回
-    program_flash(flash, OTA_FLAG_ADDR, &sector_buf)
+    // 5. 写回（按 4 字节对齐）
+    let write_len = (sector_buf.len() + 3) & !3;
+    program_flash(flash, OTA_FLAG_ADDR, &sector_buf[..write_len])
 }
 
-/// 将 OTA Temp 区域拷贝到 App 区域
+/// 将 OTA Temp 区域的固件数据拷贝到 App 区域
 ///
 /// 这是 servo-robot-board-bootloader 的核心功能:
-/// 1. 擦除 App 扇区 (1-3)
-/// 2. 从 OTA Temp 读取数据并写入 App
+/// 1. 擦除 App 扇区 (1-5)
+/// 2. 从 OTA Temp (跳过 OtaImageHeader) 读取固件数据并写入 App
 /// 3. 清除 OTA 标志
+///
+/// `size` 参数为固件数据大小 (不含 OtaImageHeader), 通常从
+/// `validate_ota_image()` 返回的 `OtaImageHeader.image_size` 获取.
 pub fn copy_ota_to_app(flash: &FLASH, size: u32) -> Result<(), FlashError> {
     if size > APP_MAX_SIZE {
         return Err(FlashError::OutOfRange);
@@ -421,15 +428,16 @@ pub fn copy_ota_to_app(flash: &FLASH, size: u32) -> Result<(), FlashError> {
         erase_sector(flash, sector)?;
     }
 
-    // 按 4KB 块拷贝
+    // 按 4KB 块拷贝 (跳过 OtaImageHeader)
+    let src_base = OTA_TEMP_ADDR + OTA_IMAGE_HEADER_SIZE;
     let mut offset = 0u32;
     let mut buf = [0u8; 4096];
 
     while offset < size {
         let chunk_size = (size - offset).min(4096) as usize;
 
-        // 读取 OTA Temp
-        read_flash(OTA_TEMP_ADDR + offset, &mut buf[..chunk_size]);
+        // 读取 OTA Temp (跳过镜像头)
+        read_flash(src_base + offset, &mut buf[..chunk_size]);
 
         // 写入 App
         program_flash(flash, APP_START_ADDR + offset, &buf[..chunk_size])?;
@@ -549,9 +557,36 @@ fn calc_checksum(data: &[u8]) -> u8 {
     sum
 }
 
-/// 将 BoardConfigSnapshot 序列化为字节数组
-fn serialize_config(config: &BoardConfigSnapshot) -> alloc::vec::Vec<u8> {
-    config.to_bytes()
+/// 配置有效载荷大小 (4 bool + 2 u8 + 7 u16 + 1 u32 = 24 bytes)
+const CONFIG_PAYLOAD_SIZE: usize = 24;
+
+/// 将 BoardConfigSnapshot 序列化到栈缓冲区，避免堆分配
+///
+/// 返回写入的字节数 (固定为 CONFIG_PAYLOAD_SIZE)。
+fn serialize_config_to_buf(config: &BoardConfigSnapshot, buf: &mut [u8]) -> usize {
+    let mut o = 0;
+
+    // === Switches (0x10~0x13) ===
+    buf[o] = config.power_servo_on as u8; o += 1;
+    buf[o] = config.power_5v_on as u8; o += 1;
+    buf[o] = config.charge_on as u8; o += 1;
+    buf[o] = config.bat_ext_out_on as u8; o += 1;
+
+    // === Charge settings (0x20~0x21) ===
+    buf[o] = config.charge_stop_percentage; o += 1;
+    buf[o] = config.tx_log_level as u8; o += 1;
+
+    // === Limits (0x30~0x37) ===
+    buf[o..o + 2].copy_from_slice(&config.servo_current_limit_ma.to_le_bytes()); o += 2;
+    buf[o..o + 2].copy_from_slice(&config.servo_temp_limit.to_le_bytes()); o += 2;
+    buf[o..o + 2].copy_from_slice(&config.temp_5v_limit.to_le_bytes()); o += 2;
+    buf[o..o + 2].copy_from_slice(&config.charge_max_current_ma.to_le_bytes()); o += 2;
+    buf[o..o + 2].copy_from_slice(&config.charge_temp_derating.to_le_bytes()); o += 2;
+    buf[o..o + 2].copy_from_slice(&config.charge_temp_limit.to_le_bytes()); o += 2;
+    buf[o..o + 2].copy_from_slice(&config.charge_stop_voltage_mv.to_le_bytes()); o += 2;
+    buf[o..o + 4].copy_from_slice(&config.servo_baud_rate.to_le_bytes()); o += 4;
+
+    o
 }
 
 /// 从字节数组反序列化 BoardConfigSnapshot

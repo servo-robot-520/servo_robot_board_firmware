@@ -11,28 +11,29 @@ use stm32f4xx_hal::pac::{USART1, USART2};
 
 /// UART2 TX ring buffer 大小 (必须是 2 的幂)
 pub const UART_TX_BUF_SIZE: usize = 2048;
-const UART_TX_MASK: usize = UART_TX_BUF_SIZE - 1;
 
 /// UART2 接收缓冲区大小
 pub const UART_RX_BUF_SIZE: usize = 512;
 
 /// 全局 TX ring buffer
-pub static UART_TX_BUF: UartRingBuffer = UartRingBuffer::new();
+pub static UART_TX_BUF: UartRingBuffer<2048> = UartRingBuffer::new();
 
 /// 全局 RX ring buffer
-pub static UART2_RX_BUF: UartRingBuffer = UartRingBuffer::new();
+pub static UART2_RX_BUF: UartRingBuffer<512> = UartRingBuffer::new();
 
-/// UART 环形缓冲区
-pub struct UartRingBuffer {
-    buf: [u8; UART_TX_BUF_SIZE],
+/// UART 环形缓冲区 (const generic 大小，必须是 2 的幂)
+pub struct UartRingBuffer<const N: usize> {
+    buf: [u8; N],
     head: AtomicUsize,
     tail: AtomicUsize,
 }
 
-impl UartRingBuffer {
+impl<const N: usize> UartRingBuffer<N> {
+    const MASK: usize = N - 1;
+
     pub const fn new() -> Self {
         Self {
-            buf: [0; UART_TX_BUF_SIZE],
+            buf: [0; N],
             head: AtomicUsize::new(0),
             tail: AtomicUsize::new(0),
         }
@@ -42,13 +43,13 @@ impl UartRingBuffer {
     pub fn write(&self, data: &[u8]) -> usize {
         let head = self.head.load(Ordering::Relaxed);
         let tail = self.tail.load(Ordering::Acquire);
-        let available = UART_TX_BUF_SIZE - head.wrapping_sub(tail);
+        let available = N - head.wrapping_sub(tail);
         let to_write = data.len().min(available);
         if to_write == 0 {
             return 0;
         }
-        let pos = head & UART_TX_MASK;
-        let first = (UART_TX_BUF_SIZE - pos).min(to_write);
+        let pos = head & Self::MASK;
+        let first = (N - pos).min(to_write);
         unsafe {
             core::ptr::copy_nonoverlapping(
                 data.as_ptr(),
@@ -77,7 +78,7 @@ impl UartRingBuffer {
         if tail == head {
             return None;
         }
-        let pos = tail & UART_TX_MASK;
+        let pos = tail & Self::MASK;
         let byte = unsafe { *self.buf.as_ptr().add(pos) };
         self.tail.store(tail.wrapping_add(1), Ordering::Release);
         Some(byte)
@@ -161,10 +162,11 @@ pub fn uart2_try_decode_frame() -> Option<servo_robot_protocol::frame::RawFrame>
         // 读取数据到临时缓冲区
         let mut buf = [0u8; 512];
         let to_read = available.min(512);
+        let rx_mask: usize = UART_RX_BUF_SIZE - 1;
         let head = UART2_RX_BUF.head.load(Ordering::Acquire);
         let tail = UART2_RX_BUF.tail.load(Ordering::Relaxed);
         for i in 0..to_read {
-            let pos = (tail + i) & UART_TX_MASK;
+            let pos = (tail + i) & rx_mask;
             buf[i] = unsafe { *UART2_RX_BUF.buf.as_ptr().add(pos) };
         }
 
@@ -231,17 +233,15 @@ pub fn enqueue_frame(frame: &servo_robot_protocol::frame::RawFrame) -> usize {
 
 /// UART1 TX ring buffer 大小
 pub const UART1_TX_BUF_SIZE: usize = 1024;
-const UART1_TX_MASK: usize = UART1_TX_BUF_SIZE - 1;
 
 /// UART1 RX ring buffer 大小
 pub const UART1_RX_BUF_SIZE: usize = 512;
-const UART1_RX_MASK: usize = UART1_RX_BUF_SIZE - 1;
 
 /// UART1 TX ring buffer
-pub static UART1_TX_BUF: UartRingBuffer = UartRingBuffer::new();
+pub static UART1_TX_BUF: UartRingBuffer<1024> = UartRingBuffer::new();
 
 /// UART1 RX ring buffer
-pub static UART1_RX_BUF: UartRingBuffer = UartRingBuffer::new();
+pub static UART1_RX_BUF: UartRingBuffer<512> = UartRingBuffer::new();
 
 /// UART1 是否正在发送（用于 TX 完成后拉低 PB12）
 static UART1_TX_ACTIVE: AtomicU8 = AtomicU8::new(0);

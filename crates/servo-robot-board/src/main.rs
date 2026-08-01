@@ -75,6 +75,7 @@ fn check_stack_watermark() -> u16 {
 mod app {
     use super::*;
     use rtic::Mutex;
+    use static_cell::StaticCell;
     use stm32f4xx_hal::{
         gpio::{Input, Output, PushPull, gpioa, gpiob, gpioc},
         i2c::I2c,
@@ -83,6 +84,13 @@ mod app {
         rcc::Config as RccConfig,
     };
     use usb_device::prelude::*;
+
+    /// USB endpoint memory buffer (must be in static scope for USB peripheral DMA access).
+    static EP_MEMORY: StaticCell<[u32; 128]> = StaticCell::new();
+    /// USB bus allocator storage (must be in static scope to produce `'static` references).
+    static USB_BUS_STORE: StaticCell<
+        Option<usb_device::bus::UsbBusAllocator<stm32f4xx_hal::otg_fs::UsbBusType>>,
+    > = StaticCell::new();
 
     /// Local `SpiDevice` adapter for the MPU6500's exclusive SPI bus and CS pin.
     struct MpuSpiDevice<SPI, CS> {
@@ -400,20 +408,11 @@ mod app {
             &clocks,
         );
 
-        struct SyncUnsafeCell<T>(core::cell::UnsafeCell<T>);
-        unsafe impl<T> Sync for SyncUnsafeCell<T> {}
-        static EP_MEMORY: SyncUnsafeCell<[u32; 128]> =
-            SyncUnsafeCell(core::cell::UnsafeCell::new([0; 128]));
-        static USB_BUS_STORE: SyncUnsafeCell<
-            Option<usb_device::bus::UsbBusAllocator<stm32f4xx_hal::otg_fs::UsbBusType>>,
-        > = SyncUnsafeCell(core::cell::UnsafeCell::new(None));
-
-        let ep_mem: &'static mut [u32; 128] = unsafe { &mut *EP_MEMORY.0.get() };
+        let ep_mem: &'static mut [u32; 128] = EP_MEMORY.init([0; 128]);
         let usb_bus = stm32f4xx_hal::otg_fs::UsbBus::new(usb_periph, ep_mem);
-        unsafe {
-            *USB_BUS_STORE.0.get() = Some(usb_bus);
-        }
-        let usb_bus_ref: &'static _ = unsafe { (*USB_BUS_STORE.0.get()).as_ref().unwrap() };
+        let usb_bus_store: &'static mut Option<_> = USB_BUS_STORE.init(None);
+        *usb_bus_store = Some(usb_bus);
+        let usb_bus_ref: &'static _ = usb_bus_store.as_ref().unwrap();
         let usb_dev = hal::usb::UsbCompositeDevice::new(usb_bus_ref);
 
         // 从 Flash 加载配置
@@ -583,7 +582,8 @@ mod app {
     async fn charge_task(mut ctx: charge_task::Context) {
         // 从 ADC 读取充电电路 NTC 温度
         let adc_buf = hal::adc::adc_buf();
-        let charger_temp = domain::thermal::ntc_temp_c(adc_buf[hal::adc::CH_TEMP_CHARGE]) as i16;
+        // 转换为 0.1°C 单位，与 charge_temp_limit/derating 一致
+        let charger_temp = (domain::thermal::ntc_temp_c(adc_buf[hal::adc::CH_TEMP_CHARGE]) * 10.0) as i16;
 
         let phase_enum = ctx.shared.i2c1.lock(|i2c| {
             let cfg = ctx.shared.config.lock(|c| c.clone());

@@ -106,12 +106,16 @@ fn make_root_dir(buf: &mut [u8; 512], firmware_size: u32) {
 // ============================================================================
 
 /// 固件接收状态
+///
+/// MSD 路径写入格式与 Protocol OTA 路径一致:
+///   [0..16]   OtaImageHeader (magic="OTAI", image_size, image_crc32)
+///   [16..]    固件数据 (末尾 4 字节为 CRC32)
 pub struct FirmwareReceiver {
-    /// 固件总大小
+    /// 固件总大小 (从 FAT 目录项读取, 包含末尾 CRC32)
     pub firmware_size: u32,
     /// 是否就绪 (传输完成)
     pub firmware_ready: bool,
-    /// 写入偏移 (Flash OTA 区域内)
+    /// 写入偏移 (OTA 区域内, 从 OTA_IMAGE_HEADER_SIZE 开始)
     write_offset: u32,
 }
 
@@ -133,7 +137,7 @@ impl FirmwareReceiver {
             3..TOTAL_SECTORS => {
                 let flash_offset = ((lba - DATA_START_SECTOR) * SECTOR_SIZE as u32) as usize;
                 if flash_offset < self.firmware_size as usize {
-                    let addr = flash::OTA_TEMP_ADDR + 4 + flash_offset as u32;
+                    let addr = flash::OTA_TEMP_ADDR + flash::OTA_IMAGE_HEADER_SIZE + flash_offset as u32;
                     let end = (flash_offset + SECTOR_SIZE).min(self.firmware_size as usize);
                     let len = end - flash_offset;
                     flash::read_flash(addr, &mut buf[..len]);
@@ -149,6 +153,11 @@ impl FirmwareReceiver {
     }
 
     /// 处理 SCSI WRITE 命令: 写入固件数据到 Flash
+    ///
+    /// 写入布局:
+    ///   LBA 2: 检测 FIRMWARE BIN 目录项, 擦除 OTA 区域, 写入 OtaImageHeader (占位)
+    ///   LBA 3+: 固件数据写入 OTA_TEMP_ADDR + OTA_IMAGE_HEADER_SIZE
+    ///   传输完成后回填 Header 中的 image_size 和 image_crc32
     pub fn write_sector(
         &mut self,
         lba: u32,
@@ -163,25 +172,40 @@ impl FirmwareReceiver {
                     if entry[0..11] == *b"FIRMWARE BIN" {
                         let file_size =
                             u32::from_le_bytes([entry[28], entry[29], entry[30], entry[31]]);
-                        if file_size > 0 {
+                        // 固件文件必须大于 Header 大小 + CRC32 大小
+                        if file_size > flash::OTA_IMAGE_HEADER_SIZE + 4 {
                             self.firmware_size = file_size;
                             self.write_offset = 0;
                             self.firmware_ready = false;
                             flash::erase_ota_temp(flash_periph).ok();
-                            let size_bytes = file_size.to_le_bytes();
-                            flash::program_flash(flash_periph, flash::OTA_TEMP_ADDR, &size_bytes)
-                                .ok();
+                            // 写入 OtaImageHeader 占位 (image_size 和 CRC 后续回填)
+                            patch_ota_header(
+                                flash_periph,
+                                0, // image_size placeholder
+                                0, // image_crc32 placeholder
+                            );
                         }
                     }
                 }
             }
             3..TOTAL_SECTORS => {
                 if self.firmware_size > 0 {
-                    let addr = flash::OTA_TEMP_ADDR + 4 + self.write_offset;
+                    let addr =
+                        flash::OTA_TEMP_ADDR + flash::OTA_IMAGE_HEADER_SIZE + self.write_offset;
                     flash::program_flash(flash_periph, addr, data).ok();
                     self.write_offset += SECTOR_SIZE as u32;
 
                     if self.write_offset >= self.firmware_size {
+                        // 传输完成: 从 Flash 读取末尾 4 字节作为 CRC32,
+                        // 并回填 Header 中的 image_size 和 image_crc32
+                        let image_size = self.firmware_size - 4;
+                        let crc_addr = flash::OTA_TEMP_ADDR
+                            + flash::OTA_IMAGE_HEADER_SIZE
+                            + image_size;
+                        let mut crc_buf = [0u8; 4];
+                        flash::read_flash(crc_addr, &mut crc_buf);
+                        let image_crc32 = u32::from_le_bytes(crc_buf);
+                        patch_ota_header(flash_periph, image_size, image_crc32);
                         self.firmware_ready = true;
                     }
                 }
@@ -196,6 +220,19 @@ impl FirmwareReceiver {
         self.firmware_ready = false;
         self.write_offset = 0;
     }
+}
+
+/// 写入或回填 OtaImageHeader 到 OTA_TEMP_ADDR
+fn patch_ota_header(flash_periph: &stm32f4xx_hal::pac::FLASH, image_size: u32, image_crc32: u32) {
+    let mut hdr = [0u8; flash::OTA_IMAGE_HEADER_SIZE as usize];
+    // magic: "OTAI"
+    hdr[0..4].copy_from_slice(&flash::OTA_IMAGE_MAGIC.to_le_bytes());
+    hdr[4] = flash::OTA_IMAGE_FORMAT_VERSION;
+    hdr[5] = flash::OTA_TARGET_MCU_F411;
+    // _reserved [6..8] = 0
+    hdr[8..12].copy_from_slice(&image_size.to_le_bytes());
+    hdr[12..16].copy_from_slice(&image_crc32.to_le_bytes());
+    flash::program_flash(flash_periph, flash::OTA_TEMP_ADDR, &hdr).ok();
 }
 
 // ============================================================================
