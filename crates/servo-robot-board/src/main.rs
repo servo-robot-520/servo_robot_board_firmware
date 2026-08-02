@@ -342,7 +342,8 @@ mod app {
             let exti = unsafe { &*stm32f4xx_hal::pac::EXTI::ptr() };
             // PB5 双边沿 (上升+下降), PB14 下降沿
             exti.rtsr().modify(|_, w| w.tr5().set_bit());
-            exti.ftsr().modify(|_, w| w.tr5().set_bit().tr14().set_bit());
+            exti.ftsr()
+                .modify(|_, w| w.tr5().set_bit().tr14().set_bit());
             // 使能中断
             exti.imr().modify(|_, w| w.mr5().set_bit().mr14().set_bit());
 
@@ -937,14 +938,20 @@ mod app {
     async fn husb_interrupt_task(mut ctx: husb_interrupt_task::Context) {
         use embedded_husb238a::Husb238a;
 
-        // 读取并清除 HUSB238A 中断锁存，获取中断状态
-        let status = ctx.shared.i2c1.lock(|i2c| {
+        // 读取并清除 HUSB238A 中断锁存，再读取实际连接状态。
+        let interrupt = ctx.shared.i2c1.lock(|i2c| {
             let mut husb = Husb238a::new(i2c);
             match husb.handle_interrupt() {
-                Ok(status) => {
-                    defmt::info!("HUSB238A interrupt handled");
-                    Some(status)
-                }
+                Ok(status) => match husb.charger_attached() {
+                    Ok(attached) => {
+                        defmt::info!("HUSB238A interrupt handled, attached={}", attached);
+                        Some((status, attached))
+                    }
+                    Err(_e) => {
+                        defmt::warn!("HUSB238A read attachment state failed");
+                        None
+                    }
+                },
                 Err(_e) => {
                     defmt::warn!("HUSB238A handle_interrupt failed");
                     None
@@ -952,10 +959,23 @@ mod app {
             }
         });
 
-        // 根据中断状态更新 board_event
-        if let Some(_status) = status {
-            // HUSB238A 状态已由驱动内部更新
-            // 触发事件上报
+        // 将 HUSB 中断快照投影到 board_event，随后由 diff 事件任务发送帧。
+        if let Some((status, attached)) = interrupt {
+            ctx.shared.board_event.lock(|event| {
+                event
+                    .state_change_flags
+                    .set(StateChangeFlags::CHARGER_CONNECTED, attached);
+                if status.has_fault() {
+                    event.charge_phase = ChargePhase::PdSinkFault;
+                }
+            });
+
+            if status.has_attach_change() {
+                defmt::info!("HUSB238A attachment state changed: {}", attached);
+            }
+            if status.has_fault() {
+                defmt::warn!("HUSB238A PD sink fault reported");
+            }
             event_task::spawn().ok();
         }
     }

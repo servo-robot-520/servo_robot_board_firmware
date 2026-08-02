@@ -1,6 +1,7 @@
 //! Data types for the HUSB238A driver.
 
 use crate::registers::{
+    INT1_I_ATTACH, INT1_I_DETACH, INT1_I_FAULT, INT1_I_VBUS_OV, INT2_I_TSD, INT2_I_VBUS_UV,
     PD_CONTRACT_5V, PD_CONTRACT_9V, PD_CONTRACT_12V, PD_CONTRACT_15V, PD_CONTRACT_20V,
     PD_CONTRACT_28V, PD_CONTRACT_36V, PD_CONTRACT_48V, PD_CONTRACT_AVS, PD_CONTRACT_EPR_AVS,
     PD_CONTRACT_PPS1, PD_CONTRACT_PPS2, PD_CONTRACT_PPS3, PD_CONTRACT_TYPEC_5V,
@@ -150,6 +151,19 @@ pub struct InterruptStatus {
     pub int2: u8,
 }
 
+impl InterruptStatus {
+    /// Returns true when the controller reported Type-C source attachment or detachment.
+    pub const fn has_attach_change(&self) -> bool {
+        self.int1 & (INT1_I_ATTACH | INT1_I_DETACH) != 0
+    }
+
+    /// Returns true when the controller reported a PD sink fault condition.
+    pub const fn has_fault(&self) -> bool {
+        self.int1 & (INT1_I_FAULT | INT1_I_VBUS_OV) != 0
+            || self.int2 & (INT2_I_VBUS_UV | INT2_I_TSD) != 0
+    }
+}
+
 /// PPS max voltage codes (SRC_PPS_VOLTAGE register bits [7:6], [5:4], [3:2])
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(feature = "defmt-03", derive(defmt::Format))]
@@ -184,5 +198,80 @@ impl PpsMaxVoltage {
             2 => Self::V16,
             _ => Self::V21,
         }
+    }
+}
+
+#[cfg(test)]
+extern crate std;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registers::{
+        INT1_I_ATTACH, INT1_I_DETACH, INT1_I_FAULT, INT1_I_VBUS_OV, INT2_I_TSD, INT2_I_VBUS_UV,
+    };
+
+    #[test]
+    fn interrupt_status_reports_attach_and_detach_changes() {
+        assert!(
+            InterruptStatus {
+                int: 0,
+                int1: INT1_I_ATTACH,
+                int2: 0,
+            }
+            .has_attach_change()
+        );
+        assert!(
+            InterruptStatus {
+                int: 0,
+                int1: INT1_I_DETACH,
+                int2: 0,
+            }
+            .has_attach_change()
+        );
+        assert!(
+            !InterruptStatus {
+                int: 0,
+                int1: 0,
+                int2: 0,
+            }
+            .has_attach_change()
+        );
+    }
+
+    #[test]
+    fn interrupt_status_reports_all_pd_sink_fault_sources() {
+        for status in [
+            InterruptStatus {
+                int: 0,
+                int1: INT1_I_FAULT,
+                int2: 0,
+            },
+            InterruptStatus {
+                int: 0,
+                int1: INT1_I_VBUS_OV,
+                int2: 0,
+            },
+            InterruptStatus {
+                int: 0,
+                int1: 0,
+                int2: INT2_I_VBUS_UV,
+            },
+            InterruptStatus {
+                int: 0,
+                int1: 0,
+                int2: INT2_I_TSD,
+            },
+        ] {
+            assert!(status.has_fault());
+        }
+        assert!(
+            !InterruptStatus {
+                int: 0,
+                int1: 0,
+                int2: 0,
+            }
+            .has_fault()
+        );
     }
 }
