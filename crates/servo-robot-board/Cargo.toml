@@ -50,9 +50,9 @@ defmt-rtt = "1.3.0"
 panic-halt = "1.0.0"
 
 [features]
-default = ["uart-connect"]
-uart-connect = []
-usb-connect = []
+# USB and UART2 are board capabilities, not optional build variants. Keep only
+# feature flags that change compiled behavior.
+default = []
 servo = []  # 启用串口舵机通信 (UART1)
 
 [[bin]]

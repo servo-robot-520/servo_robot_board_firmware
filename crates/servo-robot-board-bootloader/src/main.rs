@@ -19,7 +19,6 @@ use stm32f4::stm32f411;
 #[derive(Debug, PartialEq)]
 enum FlashError {
     Timeout,
-    EraseError,
     ProgramError,
 }
 
