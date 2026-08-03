@@ -5,5 +5,7 @@
 pub mod adc;
 pub mod flash;
 pub mod uart;
+#[cfg(feature = "servo")]
+pub mod uart1;
 pub mod usb;
 pub mod ws2812;

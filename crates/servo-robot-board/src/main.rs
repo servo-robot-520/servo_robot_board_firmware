@@ -369,8 +369,8 @@ mod app {
                 .modify(|_, w| w.moder0().analog().moder1().analog());
         }
 
-        // UART1 GPIO: PA15=TX, PA10=RX (AF7)
-        // 需要先禁用 JTAG (PA15 默认是 JTDI)
+        // UART1 GPIO: PA15=TX, PA10=RX (AF7) - 仅 servo 特性启用时
+        #[cfg(feature = "servo")]
         {
             let gpioa_regs = unsafe { &*stm32f4xx_hal::pac::GPIOA::ptr() };
             // AFRH: PA15=AFRH[31:28], PA10=AFRH[7:4]
@@ -392,15 +392,10 @@ mod app {
             gpioa_regs
                 .ospeedr()
                 .modify(|_, w| w.ospeedr15().high_speed().ospeedr10().high_speed());
-            // 禁用 JTAG (SWJ_CFG = 010: JTAG-DP Disabled, SW-DP Enabled)
-            // 释放 PA15, PB3, PB4 为普通 GPIO
-            let afio_regs = unsafe { &*stm32f4xx_hal::pac::SYSCFG::ptr() };
-            // 对于 STM32F4, 通过 DBGMCU 或 AFIO_MAPR 禁用 JTAG
-            // 实际上 STM32F4 使用 DBGMCU_CR 的 SWJ_CFG 位
-            // 但更简单的方式是直接配置 GPIO，HAL 会处理
         }
 
-        // UART1 USART1 配置: 默认 115200, 8N1
+        // UART1 USART1 配置: 默认 115200, 8N1 - 仅 servo 特性启用时
+        #[cfg(feature = "servo")]
         {
             let usart1 = &dp.USART1;
             // APB2 时钟 = 96MHz, BRR = 96000000 / 115200 = 833
@@ -417,8 +412,8 @@ mod app {
             unsafe {
                 cortex_m::peripheral::NVIC::unmask(stm32f4xx_hal::pac::Interrupt::USART1);
             }
+            defmt::info!("UART1 initialized (115200 baud, servo)");
         }
-        defmt::info!("UART1 initialized (115200 baud, servo)");
 
         // I2C1 (PB6=SCL, PB7=SDA)
         let scl1 = gpiob.pb6.into_alternate_open_drain();
@@ -810,7 +805,12 @@ mod app {
                         ctx.shared.config.lock(|c| c.charge_stop_percentage = v)
                     }
                     Config::TxLogLevel(level) => ctx.shared.config.lock(|c| c.tx_log_level = level),
-                    Config::ServoBaudRate(v) => ctx.shared.config.lock(|c| c.servo_baud_rate = v),
+                    Config::ServoBaudRate(v) => {
+                        #[cfg(feature = "servo")]
+                        ctx.shared.config.lock(|c| c.servo_baud_rate = v);
+                        #[cfg(not(feature = "servo"))]
+                        let _ = v; // servo 特性未启用时忽略
+                    }
                 }
 
                 // 保存配置到 Flash
@@ -833,17 +833,25 @@ mod app {
                 comm_tx_task::spawn(TypedFrame::AckCfgQueryAll(s)).ok();
             }
             TypedFrame::ServoForward(wrapper) => {
-                // 将舵机命令转发到 UART1
-                // 拉高 TX 使能
-                ctx.shared.servo_tx_en.lock(|p| p.set_high());
-                // 写入 UART1 TX 队列
-                let data = wrapper.data();
-                hal::uart::uart1_enqueue_tx(data);
-                // 触发 UART1 TX 发送
-                ctx.shared.usart1.lock(|usart1| {
-                    hal::uart::uart1_trigger_tx(usart1);
-                });
-                defmt::info!("ServoForward: {} bytes sent to UART1", data.len());
+                #[cfg(feature = "servo")]
+                {
+                    // 将舵机命令转发到 UART1
+                    // 拉高 TX 使能
+                    ctx.shared.servo_tx_en.lock(|p| p.set_high());
+                    // 写入 UART1 TX 队列
+                    let data = wrapper.data();
+                    hal::uart1::uart1_enqueue_tx(data);
+                    // 触发 UART1 TX 发送
+                    ctx.shared.usart1.lock(|usart1| {
+                        hal::uart1::uart1_trigger_tx(usart1);
+                    });
+                    defmt::info!("ServoForward: {} bytes sent to UART1", data.len());
+                }
+                #[cfg(not(feature = "servo"))]
+                {
+                    defmt::warn!("ServoForward ignored: servo feature not enabled");
+                    let _ = wrapper;
+                }
             }
             TypedFrame::FirmwareUpdate(wrapper) => {
                 let data = wrapper.data();
@@ -1218,44 +1226,54 @@ mod app {
     }
 
     // ===== UART1 中断处理 (串口舵机) =====
+    // 注意: RTIC 不支持 cfg 属性在 task 上，所以使用条件编译在函数内部
     #[task(priority = 5, binds = USART1, shared = [usart1, servo_tx_en, uart_errors])]
     fn usart1_irq_task(mut ctx: usart1_irq_task::Context) {
-        let had_rx = ctx.shared.usart1.lock(|usart1| {
-            let sr = usart1.sr().read();
-            let had_rx = sr.rxne().bit_is_set();
-            hal::uart::handle_usart1_irq(usart1);
-            had_rx
-        });
-        // TX 完成后拉低 SERVO_TX_EN
-        if !hal::uart::uart1_tx_pending() {
-            ctx.shared.servo_tx_en.lock(|p| p.set_low());
-        }
-        // 收到 RX 数据后，触发检查任务
-        if had_rx {
-            servo_rx_check_task::spawn().ok();
+        #[cfg(feature = "servo")]
+        {
+            let had_rx = ctx.shared.usart1.lock(|usart1| {
+                let sr = usart1.sr().read();
+                let had_rx = sr.rxne().bit_is_set();
+                hal::uart1::handle_usart1_irq(usart1);
+                had_rx
+            });
+            // TX 完成后拉低 SERVO_TX_EN
+            if !hal::uart1::uart1_tx_pending() {
+                ctx.shared.servo_tx_en.lock(|p| p.set_low());
+            }
+            // 收到 RX 数据后，触发检查任务
+            if had_rx {
+                servo_rx_check_task::spawn().ok();
+            }
         }
     }
 
     // ===== UART1 TX 刷新 =====
     #[task(priority = 5, shared = [usart1, servo_tx_en])]
     async fn servo_tx_flush_task(mut ctx: servo_tx_flush_task::Context) {
-        // 拉高 TX 使能
-        ctx.shared.servo_tx_en.lock(|p| p.set_high());
-        // 触发 UART1 TX
-        ctx.shared.usart1.lock(|usart1| {
-            hal::uart::uart1_trigger_tx(usart1);
-        });
+        #[cfg(feature = "servo")]
+        {
+            // 拉高 TX 使能
+            ctx.shared.servo_tx_en.lock(|p| p.set_high());
+            // 触发 UART1 TX
+            ctx.shared.usart1.lock(|usart1| {
+                hal::uart1::uart1_trigger_tx(usart1);
+            });
+        }
     }
 
     // ===== 串口舵机 RX 检查 (50Hz) =====
     #[task(priority = 3, shared = [frames_sent])]
     async fn servo_rx_check_task(ctx: servo_rx_check_task::Context) {
-        let mut buf = [0u8; 512];
-        let count = hal::uart::uart1_read_rx(&mut buf);
-        if count > 0 {
-            let wrapper = ServoCmdWrapper::new(buf[..count].to_vec());
-            comm_tx_task::spawn(TypedFrame::AckServoCmd(wrapper)).ok();
-            defmt::info!("Servo RX: {} bytes forwarded to host", count);
+        #[cfg(feature = "servo")]
+        {
+            let mut buf = [0u8; 512];
+            let count = hal::uart1::uart1_read_rx(&mut buf);
+            if count > 0 {
+                let wrapper = ServoCmdWrapper::new(buf[..count].to_vec());
+                comm_tx_task::spawn(TypedFrame::AckServoCmd(wrapper)).ok();
+                defmt::info!("Servo RX: {} bytes forwarded to host", count);
+            }
         }
     }
 

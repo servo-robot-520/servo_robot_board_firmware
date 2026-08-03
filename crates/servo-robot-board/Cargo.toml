@@ -53,6 +53,7 @@ panic-halt = "1.0.0"
 default = ["uart-connect"]
 uart-connect = []
 usb-connect = []
+servo = []  # 启用串口舵机通信 (UART1)
 
 [[bin]]
 name = "servo-robot-board"

@@ -176,7 +176,7 @@ impl ChargeManager {
             max_current_ma: CHARGE_CURRENT_MAX_DEFAULT_MA,
             charge_voltage_mv: CHARGE_VOLTAGE_DEFAULT_MV,
             charge_enabled: true,
-            charge_temp_derating: 600,
+            charge_temp_derating: 650,
             charge_temp_limit: 800,
         }
     }
