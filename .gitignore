@@ -1,18 +1,6 @@
 /.idea
-.zed
-.vscode
 
 /target
 /crates/servo-robot-protocol
 
 .github
-
-.claude
-.codex
-CLAUDE.md
-AGENTS.md
-findings.md
-progress.md
-task_plan.md
-/docs/
-openspec
