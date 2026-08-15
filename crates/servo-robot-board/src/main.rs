@@ -308,11 +308,11 @@ mod app {
     // ===== Task 2: 电源 (20Hz) =====
     #[task(priority = 3, shared = [i2c1, power_data, protection_mgr, pwr_servo_en, frames_sent, board_event])]
     async fn power_task(mut ctx: power_task::Context) {
-        let adc_samples = platform::adc::adc_buf();
+        let adc_samples = platform::adc::adc_snapshot();
         let (data, servo_current_ma) = ctx
             .shared
             .i2c1
-            .lock(|i2c| features::power::task::sample_power(i2c, adc_samples));
+            .lock(|i2c| features::power::task::sample_power(i2c, &adc_samples));
 
         // 过流保护检查
         let (flags, should_cut) = ctx
@@ -361,9 +361,9 @@ mod app {
     #[task(priority = 2, shared = [i2c1, charge_mgr, board_event, config])]
     async fn charge_task(mut ctx: charge_task::Context) {
         // 从 ADC 读取充电电路 NTC 温度
-        let adc_buf = platform::adc::adc_buf();
+        let adc_samples = platform::adc::adc_snapshot();
         // 转换为 0.1°C 单位，与 charge_temp_limit/derating 一致
-        let charger_temp = features::power::task::charge_temperature_deci_c(adc_buf);
+        let charger_temp = features::power::task::charge_temperature_deci_c(&adc_samples);
 
         let config = ctx.shared.config.lock(|current| current.clone());
         let update = ctx.shared.i2c1.lock(|i2c| {

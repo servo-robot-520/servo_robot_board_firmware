@@ -5,6 +5,8 @@
 //!
 //! DMA2 Stream0 Channel0 循环传输, 结果自动写入 adc_buf
 
+use core::cell::UnsafeCell;
+
 use stm32f4xx_hal::pac::{ADC1, DMA2};
 
 /// ADC 通道索引
@@ -32,18 +34,52 @@ pub fn adc_to_mv(adc_val: u16) -> f32 {
 const ADC_CHANNELS: [u8; ADC_CHANNEL_COUNT] = [0, 1, 4, 8, 9, 18];
 // 通道 18 是内部温度传感器
 
-/// DMA 缓冲区（由 DMA2 直接写入，地址必须稳定）
-static mut ADC_DMA_BUF: [u16; ADC_CHANNEL_COUNT] = [0; ADC_CHANNEL_COUNT];
-
-/// 获取 ADC DMA 缓冲区的引用
+/// DMA 持续写入的 ADC 采样存储。
 ///
-/// # Safety
-/// 返回的是 static mut 引用，调用者需要确保不产生数据竞争。
-/// DMA 在后台持续写入，读取时可能得到不完全一致的多通道数据，
-/// 但对于温度/电压监控场景这是可接受的。
-pub fn adc_buf() -> &'static [u16; ADC_CHANNEL_COUNT] {
-    // SAFETY: DMA 在后台只写入，读取时可能不完全一致但对监控场景可接受
-    unsafe { &*core::ptr::addr_of!(ADC_DMA_BUF) }
+/// `UnsafeCell` 明确表达此内存可在普通 Rust 借用之外被 DMA 修改。
+/// 对外只提供复制快照，避免暴露一个指向 DMA 持续写入内存的共享引用。
+#[repr(transparent)]
+struct AdcDmaBuffer {
+    samples: UnsafeCell<[u16; ADC_CHANNEL_COUNT]>,
+}
+
+// DMA 是外部写入者；CPU 侧仅通过 `snapshot` 作 volatile 读取，并且不会
+// 向外泄漏对内部存储的引用。
+unsafe impl Sync for AdcDmaBuffer {}
+
+impl AdcDmaBuffer {
+    const fn new() -> Self {
+        Self {
+            samples: UnsafeCell::new([0; ADC_CHANNEL_COUNT]),
+        }
+    }
+
+    fn as_mut_ptr(&self) -> *mut u16 {
+        self.samples.get().cast::<u16>()
+    }
+
+    fn snapshot(&self) -> [u16; ADC_CHANNEL_COUNT] {
+        let samples = self.samples.get().cast::<u16>();
+        core::array::from_fn(|index| {
+            // SAFETY: `samples` points at the statically allocated DMA buffer.
+            // Volatile loads ensure every element is read from memory even while
+            // DMA2 is updating the circular buffer. A snapshot can span two DMA
+            // scan cycles, which is acceptable for these monitoring channels.
+            unsafe { core::ptr::read_volatile(samples.add(index)) }
+        })
+    }
+}
+
+/// DMA 缓冲区（由 DMA2 直接写入，地址必须稳定）。
+static ADC_DMA_BUF: AdcDmaBuffer = AdcDmaBuffer::new();
+
+/// Copy the latest ADC DMA samples.
+///
+/// The returned array is independent of the DMA storage. Values from one call
+/// may originate from adjacent scan cycles because DMA continuously updates the
+/// channels; temperature and voltage monitoring tolerates that skew.
+pub fn adc_snapshot() -> [u16; ADC_CHANNEL_COUNT] {
+    ADC_DMA_BUF.snapshot()
 }
 
 /// 初始化 ADC1 + DMA2 循环采集
@@ -56,7 +92,7 @@ pub fn adc_buf() -> &'static [u16; ADC_CHANNEL_COUNT] {
 /// 1. RCC 时钟已使能 (ADC1, DMA2, GPIOA, GPIOB)
 /// 2. ADC 引脚已配置为模拟输入 (PA0, PA1, PA4, PB0, PB1)
 pub fn init_adc_dma(adc1: &ADC1, dma2: &DMA2) {
-    let adc_buf_ptr = core::ptr::addr_of_mut!(ADC_DMA_BUF) as *mut u16;
+    let adc_buf_ptr = ADC_DMA_BUF.as_mut_ptr();
 
     // === DMA2 Stream0 Channel0 配置 ===
     let stream = dma2.st(0);

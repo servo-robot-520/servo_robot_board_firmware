@@ -58,8 +58,8 @@ pub fn fill_temperatures(
 ///
 /// Returns `(temp_charge, temp_servo, temp_5v, mcu_temp)` in degrees Celsius.
 pub fn read_all_temperatures() -> (f32, f32, f32, f32) {
-    let buf = platform::adc::adc_buf();
-    power_task::read_thermal_temperatures(buf)
+    let samples = platform::adc::adc_snapshot();
+    power_task::read_thermal_temperatures(&samples)
 }
 
 /// Inputs collected by the RTIC telemetry wrapper for one system-info tick.
