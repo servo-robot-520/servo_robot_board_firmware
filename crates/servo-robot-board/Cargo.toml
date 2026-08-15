@@ -6,19 +6,19 @@ edition.workspace = true
 [dependencies]
 # 机器人协议包 (使用本地最新版本)
 servo-robot-protocol = {
-    path = "/mnt/LinuxData/Projects/embedded/servo_robot_board_tools/crates/servo-robot-protocol",
+    path = "../../../servo_robot_board_driver/crates/servo-robot-protocol",
     default-features = false,
     features = ["embedded"]
 }
-#servo-robot-protocol = { git = "https://github.com/greenhand520/servo_robot_board_tools",
+#servo-robot-protocol = { git = "https://github.com/servo-robot-520/servo_robot_board_driver",
 #    branch = "main", default-features = false, features = ["embedded"] }
 
 # Cortex-M核心
-cortex-m = { version = "0.7.6", features = ["critical-section-single-core"] }
-cortex-m-rt = "0.7.1"
+cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7"
 
 # RTIC框架
-rtic = { version = "2.1.1", features = ["thumbv7-backend", "rtic-monotonics"] }
+rtic = { version = "2.1", features = ["thumbv7-backend", "rtic-monotonics"] }
 rtic-sync = "1.4.0"
 
 # STM32F4 HAL
