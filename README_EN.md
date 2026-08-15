@@ -15,7 +15,7 @@ Embedded Rust firmware for STM32F411, providing integrated power management, sen
 | Power Monitor | INA219 | I2C1 (0x40) | Servo bus voltage/current |
 | IMU | MPU6500 | SPI1 (1MHz) | 6-axis motion sensor |
 | LEDs | WS2812 × 3 | TIM1 CH2 + DMA | Status indicators |
-| Buzzer | Passive buzzer | TIM2 CH2 | Audio feedback |
+| Buzzer | 5025 | TIM2 CH2 | Audio feedback |
 
 ## Repository Structure
 
